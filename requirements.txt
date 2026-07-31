@@ -1,0 +1,4 @@
+# Web server is stdlib (wsgiref) — no Flask dependency needed.
+pandas==2.2.2
+requests==2.32.3
+pytest==8.2.2

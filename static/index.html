@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Momentum Tracker</title>
+<style>
+  :root {
+    --bg: #0b1f16;
+    --card: #ffffff;
+    --accent: #1f9d55;
+    --accent-dark: #14361f;
+    --text: #1a1a1a;
+    --muted: #6b7280;
+    --border: #e5e7eb;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+    background: #f4f6f5;
+    color: var(--text);
+  }
+  header {
+    background: var(--bg);
+    color: white;
+    padding: 24px 32px;
+  }
+  header h1 { margin: 0 0 4px 0; font-size: 22px; }
+  header p { margin: 0; color: #a9c4b3; font-size: 13px; }
+  main { max-width: 1100px; margin: 24px auto; padding: 0 16px; }
+  .controls {
+    display: flex; gap: 12px; align-items: center; margin-bottom: 16px;
+    background: var(--card); padding: 16px; border-radius: 10px; border: 1px solid var(--border);
+  }
+  .controls input[type="date"] {
+    padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px; font-size: 14px;
+  }
+  .controls button {
+    background: var(--accent); color: white; border: none; padding: 9px 18px;
+    border-radius: 6px; font-size: 14px; cursor: pointer;
+  }
+  .controls button:disabled { background: #9bd4ac; cursor: not-allowed; }
+  #statusLine { font-size: 13px; color: var(--muted); margin-left: auto; }
+  .banner {
+    padding: 12px 16px; border-radius: 8px; margin-bottom: 16px; font-size: 14px;
+  }
+  .banner.error { background: #fdecea; color: #9d1c1c; border: 1px solid #f3b4ac; }
+  .banner.warn { background: #fff8e1; color: #8a6d1a; border: 1px solid #f0dd9f; }
+  table {
+    width: 100%; border-collapse: collapse; background: var(--card);
+    border-radius: 10px; overflow: hidden; border: 1px solid var(--border);
+  }
+  th, td { text-align: left; padding: 10px 14px; font-size: 13px; border-bottom: 1px solid var(--border); }
+  th { background: var(--accent-dark); color: white; font-weight: 600; }
+  tr:last-child td { border-bottom: none; }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .rank-badge {
+    display: inline-block; width: 22px; height: 22px; border-radius: 50%;
+    background: var(--accent); color: white; text-align: center; line-height: 22px; font-size: 12px;
+  }
+  footer { max-width: 1100px; margin: 24px auto 40px; padding: 0 16px; font-size: 12px; color: var(--muted); }
+  .empty { text-align: center; padding: 40px; color: var(--muted); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Momentum Tracker</h1>
+  <p>Personal-use ranking of NSE F&amp;O stocks on rollover %, cost of carry, price momentum and volume trend. Not investment advice.</p>
+</header>
+<main>
+  <div class="controls">
+    <label for="asOf">As of</label>
+    <input type="date" id="asOf">
+    <button id="refreshBtn">Refresh</button>
+    <span id="statusLine">Loading...</span>
+  </div>
+  <div id="bannerArea"></div>
+  <div id="tableArea"></div>
+</main>
+<footer>
+  Data source: NSE cash-market and F&amp;O bhavcopy files. Rollover % and cost of carry use the near/next-month futures contract.
+  This tool is for personal research only — it does not execute trades, guarantee accuracy, or constitute financial advice.
+</footer>
+
+<script>
+const asOfInput = document.getElementById('asOf');
+const refreshBtn = document.getElementById('refreshBtn');
+const statusLine = document.getElementById('statusLine');
+const bannerArea = document.getElementById('bannerArea');
+const tableArea = document.getElementById('tableArea');
+
+const today = new Date().toISOString().slice(0, 10);
+asOfInput.value = today;
+
+function showBanner(kind, message) {
+  bannerArea.innerHTML = `<div class="banner ${kind}">${message}</div>`;
+}
+function clearBanner() { bannerArea.innerHTML = ''; }
+
+function renderTable(result) {
+  const rows = result.rankings || [];
+  if (rows.length === 0) {
+    tableArea.innerHTML = '<div class="empty">No ranked stocks in this result.</div>';
+    return;
+  }
+  const cols = [
+    ['rank', 'Rank'], ['symbol', 'Symbol'], ['composite_score', 'Score'],
+    ['rollover_pct', 'Rollover %'], ['cost_of_carry', 'Cost of Carry %'],
+    ['price_momentum', 'Price Mom %'], ['volume_trend', 'Vol Trend'], ['weight_pct', 'Weight %']
+  ];
+  let html = '<table><thead><tr>' + cols.map(c => `<th>${c[1]}</th>`).join('') + '</tr></thead><tbody>';
+  for (const row of rows) {
+    html += '<tr>';
+    for (const [key] of cols) {
+      const val = row[key];
+      if (key === 'rank') {
+        html += `<td><span class="rank-badge">${val}</span></td>`;
+      } else if (key === 'symbol') {
+        html += `<td><strong>${val}</strong></td>`;
+      } else {
+        const num = typeof val === 'number' ? val.toFixed(2) : (val ?? '—');
+        html += `<td class="num">${num}</td>`;
+      }
+    }
+    html += '</tr>';
+  }
+  html += '</tbody></table>';
+  tableArea.innerHTML = html;
+}
+
+async function loadCached() {
+  statusLine.textContent = 'Loading cached rankings...';
+  try {
+    const res = await fetch('/api/rankings');
+    if (res.status === 404) {
+      statusLine.textContent = 'No data yet — click Refresh.';
+      tableArea.innerHTML = '<div class="empty">No rankings computed yet.</div>';
+      return;
+    }
+    const data = await res.json();
+    statusLine.textContent = `As of ${data.as_of} · bhavcopy ${data.latest_bhavcopy_date} · ${data.universe_size} stocks screened`;
+    if (data.fetch_warnings && data.fetch_warnings.length) {
+      showBanner('warn', `${data.fetch_warnings.length} day(s) of data could not be fetched — rankings may use a shorter window. See logs/app.log.`);
+    }
+    renderTable(data);
+  } catch (err) {
+    statusLine.textContent = 'Could not reach the backend.';
+    showBanner('error', `Failed to load rankings: ${err}`);
+  }
+}
+
+async function refresh() {
+  clearBanner();
+  refreshBtn.disabled = true;
+  statusLine.textContent = 'Running pipeline (fetching NSE bhavcopy, scoring, ranking)...';
+  try {
+    const res = await fetch('/api/refresh', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ as_of: asOfInput.value })
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      showBanner('error', `${data.error || 'Refresh failed'}${data.hint ? ' — ' + data.hint : ''}`);
+      statusLine.textContent = 'Refresh failed.';
+      return;
+    }
+    statusLine.textContent = `As of ${data.as_of} · bhavcopy ${data.latest_bhavcopy_date} · ${data.universe_size} stocks screened`;
+    if (data.fetch_warnings && data.fetch_warnings.length) {
+      showBanner('warn', `${data.fetch_warnings.length} day(s) of data could not be fetched — rankings may use a shorter window.`);
+    }
+    renderTable(data);
+  } catch (err) {
+    showBanner('error', `Refresh failed: ${err}`);
+    statusLine.textContent = 'Refresh failed.';
+  } finally {
+    refreshBtn.disabled = false;
+  }
+}
+
+refreshBtn.addEventListener('click', refresh);
+loadCached();
+</script>
+</body>
+</html>

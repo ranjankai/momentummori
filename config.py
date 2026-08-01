@@ -152,3 +152,150 @@ V4_CARRY_FORWARD = True
 # Where cmd_basket persists currently-open positions between live runs, so
 # it can tell HOLD from SELL from BUY the next time you generate a basket.
 V4_HOLDINGS_FILE = os.path.join(DATA_DIR, "v4_holdings.json")
+
+
+# ---------------------------------------------------------------------------
+# SECRETS
+#
+# Loaded from a gitignored .env next to this file. The real process
+# environment ALWAYS wins, so Windows Task Scheduler (or any CI) can
+# override without editing the file. Nothing here is ever committed.
+# ---------------------------------------------------------------------------
+
+ENV_FILE = os.path.join(BASE_DIR, ".env")
+
+
+def _load_dotenv(path: str = None) -> None:
+    """Minimal KEY=VALUE reader. Never overrides an existing env var."""
+    path = path or ENV_FILE
+    if not os.path.exists(path):
+        return
+    try:
+        with open(path, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, val = line.partition("=")
+                key = key.strip()
+                val = val.strip().strip('"').strip("'")
+                if key and key not in os.environ:
+                    os.environ[key] = val
+    except OSError:
+        # A missing or unreadable .env must never stop a strategy run.
+        pass
+
+
+_load_dotenv()
+
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+
+
+# ---------------------------------------------------------------------------
+# ALERTS (alerts.py)
+# ---------------------------------------------------------------------------
+
+ALERTS_ENABLED = True
+ALERT_CHANNEL = "telegram"
+
+# Send a short note when a run fails. Without this, a failed fetch is
+# indistinguishable from "no trades today" -- both are silence.
+ALERT_ON_FAILURE = True
+
+TELEGRAM_API_URL = "https://api.telegram.org/bot{token}/{method}"
+TELEGRAM_PARSE_MODE = "HTML"      # Markdown breaks on symbols containing '_'
+ALERT_MAX_CHARS = 4000            # Telegram hard limit is 4096
+
+
+# ---------------------------------------------------------------------------
+# GEMINI (llm.py)
+#
+# Waterfall: each model is tried in order until one returns valid JSON.
+# All three were verified live on 01-Aug-2026 against a strict
+# responseSchema with extended thinking enabled.
+# ---------------------------------------------------------------------------
+
+LLM_ENABLED = True
+LLM_ENDPOINT = ("https://generativelanguage.googleapis.com/v1beta/"
+                "models/{model}:generateContent")
+
+LLM_MODEL_WATERFALL = [
+    "gemini-3.6-flash",
+    "gemini-3.5-flash",
+    "gemini-3.5-flash-lite",
+]
+
+# "high" enables extended thinking. Flash-Lite has thinking OFF by default
+# and only reasons when this is set -- verified 01-Aug-2026.
+LLM_THINKING_LEVEL = "high"
+
+LLM_TIMEOUT_SECONDS = 45
+LLM_MAX_RETRIES = 3               # per model, before falling to the next tier
+LLM_RETRY_BACKOFF_BASE_SECONDS = 2
+
+# Responses are cached on disk by a hash of (prompt + schema), so a
+# re-run of the same backtest costs nothing and returns identical values.
+LLM_CACHE_DIR = os.path.join(DATA_DIR, "llm_cache")
+LLM_CACHE_ENABLED = True
+
+
+# ---------------------------------------------------------------------------
+# NSE CORPORATE FEEDS (nse_corporate.py)
+#
+# Both verified reachable 01-Aug-2026. Note the NSE homepage returns 403
+# while these API paths return 200 -- do NOT gate them on a homepage
+# "session warm-up" call.
+# ---------------------------------------------------------------------------
+
+NSE_CORP_ACTIONS_URL = (
+    "https://www.nseindia.com/api/corporates-corporateActions"
+    "?index=equities&symbol={symbol}&from_date={from_date}&to_date={to_date}"
+)
+NSE_ASM_URL = "https://www.nseindia.com/api/reportASM"
+
+# Days either side of the price move to search for an explanatory filing.
+# Actions are usually filed on the ex-date itself; the back-window catches
+# dividends and record-date entries filed a few days earlier.
+CORP_ACTION_LOOKBACK_DAYS = 10
+CORP_ACTION_LOOKAHEAD_DAYS = 3
+
+CORP_CACHE_DIR = os.path.join(DATA_DIR, "corp_cache")
+CORP_CACHE_ENABLED = True
+
+
+# ---------------------------------------------------------------------------
+# CORPORATE ACTION CLASSIFIER (corporate_actions.py)
+#
+# Gemini decides; there is no deterministic parser. The prompt states the
+# reconciliation requirement explicitly. Code independently recomputes the
+# residual between the model's adjustment_ratio and the observed price
+# ratio -- purely as a REPORTED flag. It does not override the model.
+# ---------------------------------------------------------------------------
+
+CORP_ACTION_LLM_ENABLED = True
+
+# |predicted / observed - 1| above this is reported as non-reconciling.
+# 0.15 allows for genuine same-day price movement on top of the action
+# (e.g. BSE's 2:1 bonus implies 0.3333 against an observed 0.3499).
+CORP_ACTION_RECONCILE_TOLERANCE = 0.15
+
+
+# ---------------------------------------------------------------------------
+# PRE-ORDER SURVEILLANCE VETO (surveillance.py)
+#
+# Exclusion only -- it can drop a name from the basket, never promote one.
+# NSE publishes no ASM history, so this CANNOT be backtested. It is
+# adopted on reasoning, not evidence. Set VETO_ENABLED=False to disable.
+# ---------------------------------------------------------------------------
+
+VETO_ENABLED = True
+
+# ASM stages that disqualify a name. Stage I is the mildest; higher stages
+# carry 100% margin and trade-for-trade settlement, which makes the 5%
+# resting stop unreliable.
+VETO_ASM_STAGES = ("Stage I", "Stage II", "Stage III", "Stage IV")
+
+# Veto short-term ASM as well as long-term.
+VETO_INCLUDE_SHORTTERM_ASM = True

@@ -150,6 +150,49 @@ def closed_trades() -> list:
     return sorted(out, key=lambda e: e["exit_date"])
 
 
+def performance() -> dict:
+    """
+    Portfolio performance to date, for the expiry-evening message.
+
+    Returns per-month returns plus two cumulative figures:
+
+      absolute_sum  -- monthly returns ADDED. This is the convention
+                       strategy.simulate_month uses and the one the
+                       +32.34% table in CONTEXT.md is quoted on, so it is
+                       the comparable number.
+      absolute_comp -- monthly returns COMPOUNDED. This is what your
+                       capital actually did, and the only valid base for
+                       an annualised figure.
+
+    CAGR is derived from absolute_comp. Below 12 months it is an
+    extrapolation, not a track record: `extrapolated` says so.
+    """
+    rows = monthly_summary()
+    if not rows:
+        return {"months": [], "absolute_sum": 0.0, "absolute_comp": 0.0,
+                "cagr": None, "n_months": 0, "extrapolated": True}
+
+    comp = 1.0
+    for r in rows:
+        comp *= (1 + r["return_pct"] / 100.0)
+    absolute_comp = (comp - 1) * 100.0
+    absolute_sum = sum(r["return_pct"] for r in rows)
+
+    n = len(rows)
+    cagr = None
+    if comp > 0 and n > 0:
+        cagr = ((comp ** (12.0 / n)) - 1) * 100.0
+
+    return {
+        "months": rows,
+        "absolute_sum": absolute_sum,
+        "absolute_comp": absolute_comp,
+        "cagr": cagr,
+        "n_months": n,
+        "extrapolated": n < 12,
+    }
+
+
 def monthly_summary() -> list:
     """
     One row per expiry month: last recorded MTD, trade count, win rate.

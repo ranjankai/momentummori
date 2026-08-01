@@ -353,6 +353,42 @@ def _fmt_money(v):
 LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 
 
+def render_performance(perf: dict) -> str:
+    """
+    Expiry-evening performance note. Deliberately just the numbers.
+
+    MONTH_NAMES avoids locale surprises from strftime on Windows.
+    """
+    months = perf["months"]
+    if not months:
+        return ("<b>Portfolio performance</b>\n\nNo completed months recorded "
+                "yet — the ledger starts from your first daily run.")
+
+    names = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+             "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+    L = ["<b>Portfolio performance</b>", ""]
+    for r in months:
+        y, m, _ = r["expiry"].split("-")
+        sign = "+" if r["return_pct"] >= 0 else ""
+        L.append(f"{names[int(m) - 1]} {y}: {sign}{r['return_pct']:.2f}%")
+    L.append("")
+
+    s = "+" if perf["absolute_comp"] >= 0 else ""
+    L.append(f"<b>Total: {s}{perf['absolute_comp']:.2f}% absolute</b>")
+    if abs(perf["absolute_sum"] - perf["absolute_comp"]) >= 0.05:
+        s2 = "+" if perf["absolute_sum"] >= 0 else ""
+        L.append(f"<i>({s2}{perf['absolute_sum']:.2f}% on the additive "
+                 f"convention used by the backtest)</i>")
+
+    if perf["cagr"] is not None:
+        s3 = "+" if perf["cagr"] >= 0 else ""
+        L.append(f"<b>CAGR: {s3}{perf['cagr']:.1f}%</b>")
+        if perf["extrapolated"]:
+            L.append(f"<i>⚠ extrapolated from {perf['n_months']} month(s) — "
+                     f"not a track record until 12</i>")
+    return "\n".join(L).strip()
+
+
 def build_entry_sheet(expiry: date, session=None) -> dict:
     """
     The order sheet for the month starting after `expiry`.

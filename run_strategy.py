@@ -191,6 +191,23 @@ def cmd_backtest(args):
         print(f"Saved -> {out}")
 
 
+def cmd_perf(args):
+    """Portfolio performance note. Run on expiry evening, after `sheet`."""
+    import alerts
+    import daily_report
+    import ledger
+
+    text = daily_report.render_performance(ledger.performance())
+    print(text)
+    if args.no_send:
+        print("\n(--no-send: not delivered)")
+        return
+    if not alerts.send(text):
+        print("\nDELIVERY FAILED -- see logs/app.log", file=sys.stderr)
+        sys.exit(2)
+    print(f"\nDelivered to Telegram chat {config.TELEGRAM_CHAT_ID}")
+
+
 def cmd_history(args):
     """Look back at what the system actually told you to do."""
     import ledger
@@ -292,6 +309,10 @@ def main():
     p = argparse.ArgumentParser(description="V4 momentum strategy")
     p.add_argument("-v", "--verbose", action="store_true")
     sub = p.add_subparsers(dest="cmd", required=True)
+
+    pf = sub.add_parser("perf", help="portfolio performance note (expiry evening)")
+    pf.add_argument("--no-send", action="store_true")
+    pf.set_defaults(func=cmd_perf)
 
     h = sub.add_parser("history", help="look back at recorded monthly actions")
     h.add_argument("--trades", action="store_true",

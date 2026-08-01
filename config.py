@@ -293,6 +293,12 @@ CORP_ACTION_RECONCILE_TOLERANCE = 0.15
 CORP_ACTION_UNKNOWN_POLICY = "heuristic"
 
 
+# Entry-sheet price band. The sheet is produced on expiry evening, before
+# the next session's open is known, so entry prices are quoted as a band
+# around the signal-day close rather than a single number.
+ENTRY_BAND_PCT = 2.0
+
+
 # ---------------------------------------------------------------------------
 # PRE-ORDER SURVEILLANCE VETO (surveillance.py)
 #

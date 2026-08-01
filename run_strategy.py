@@ -191,6 +191,30 @@ def cmd_backtest(args):
         print(f"Saved -> {out}")
 
 
+def cmd_sheet(args):
+    """Monthly order sheet. Run on the evening of expiry."""
+    import alerts
+    import daily_report
+
+    expiry = datetime.strptime(args.expiry, "%Y-%m-%d").date()
+    try:
+        sheet = daily_report.build_entry_sheet(expiry)
+        text = daily_report.render_entry_sheet(sheet)
+    except Exception as exc:
+        logging.getLogger("momentum_tracker").exception("Entry sheet failed")
+        alerts.send_failure(f"entry sheet for {expiry}", exc)
+        raise
+
+    print(text)
+    if args.no_send:
+        print("\n(--no-send: not delivered)")
+        return
+    if not alerts.send(text):
+        print("\nDELIVERY FAILED -- see logs/app.log", file=sys.stderr)
+        sys.exit(2)
+    print(f"\nDelivered to Telegram chat {config.TELEGRAM_CHAT_ID}")
+
+
 def cmd_daily(args):
     """
     Evening note: what exited today, what to order tomorrow, and MTD ROI.
@@ -228,6 +252,11 @@ def main():
     p = argparse.ArgumentParser(description="V4 momentum strategy")
     p.add_argument("-v", "--verbose", action="store_true")
     sub = p.add_subparsers(dest="cmd", required=True)
+
+    sh = sub.add_parser("sheet", help="monthly order sheet, run on expiry evening")
+    sh.add_argument("--expiry", required=True, help="YYYY-MM-DD (the expiry date)")
+    sh.add_argument("--no-send", action="store_true")
+    sh.set_defaults(func=cmd_sheet)
 
     d = sub.add_parser("daily", help="build and send the evening basket note")
     d.add_argument("--date", help="YYYY-MM-DD (defaults to today)")

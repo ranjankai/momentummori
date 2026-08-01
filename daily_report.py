@@ -68,6 +68,25 @@ class Holding:
             return 0.0
         return (self.last - self.entry) / self.entry * 100
 
+    @property
+    def pct_to_target(self) -> float:
+        """How far the stock still has to travel to reach the target."""
+        if not self.last:
+            return 0.0
+        return (self.target - self.last) / self.last * 100
+
+    @property
+    def target_placeable(self) -> bool:
+        """
+        True once a sell limit at `target` is inside the exchange's dynamic
+        price band, measured off the latest close. Below this it is
+        rejected at order entry, which is why the target is NOT placed on
+        entry day.
+        """
+        if not self.last:
+            return False
+        return self.target <= self.last * (1 + config.PRICE_BAND_PCT / 100.0)
+
 
 @dataclass
 class Exit:
@@ -91,6 +110,8 @@ class Report:
     exits: list = field(default_factory=list)
     to_buy: list = field(default_factory=list)
     to_sell: list = field(default_factory=list)
+    sell_orders: list = field(default_factory=list)
+    buy_orders: list = field(default_factory=list)
     mtd_return_pct: float = 0.0
     empty_slots: int = 0
     flagged_actions: list = field(default_factory=list)
@@ -271,6 +292,43 @@ def build(as_of: date, session=None) -> Report:
                  mtd_return_pct=mtd,
                  empty_slots=config.PORTFOLIO_SIZE - len(holdings) - len(to_buy))
 
+    # --- actionable orders -------------------------------------------------
+    # A target sell is only accepted by the exchange once it is inside the
+    # dynamic price band, so it is issued the evening it becomes placeable
+    # rather than on entry day.
+    for h in rpt.holdings:
+        if h.target_placeable:
+            rpt.sell_orders.append({
+                "symbol": h.symbol, "kind": "TARGET",
+                "limit": round(h.target, 2),
+                "last": round(h.last, 2) if h.last else None,
+            })
+    for sym in rpt.to_sell:
+        rpt.sell_orders.append({"symbol": sym, "kind": "MOMENTUM", "limit": None})
+
+    band = config.ENTRY_BAND_PCT / 100.0
+    stop = config.V4_STOP_LOSS_PCT / 100.0
+    last_frame = merged.get(as_of)
+    for sym in rpt.to_buy:
+        ref = None
+        if last_frame is not None and sym in last_frame.index:
+            val = last_frame.at[sym, "close_price"]
+            if pd.notna(val) and val > 0:
+                ref = float(val)
+        if ref is None:
+            logger.warning("No reference close for pending buy %s; "
+                           "quoting market only", sym)
+            rpt.buy_orders.append({"symbol": sym, "lo": None, "hi": None,
+                                   "sl_lo": None, "sl_hi": None})
+            continue
+        lo, hi = ref * (1 - band), ref * (1 + band)
+        rpt.buy_orders.append({
+            "symbol": sym,
+            "lo": round(lo, 2), "hi": round(hi, 2),
+            "sl_lo": round(lo * (1 - stop), 2),
+            "sl_hi": round(hi * (1 - stop), 2),
+        })
+
     if config.VETO_ENABLED:
         try:
             import surveillance
@@ -357,18 +415,25 @@ def render_entry_sheet(sheet: dict) -> str:
          f"<b>Invest {weight:.0f}% in each of the following:</b>",
          ""]
     for i, r in enumerate(rows):
-        tag = LETTERS[i] if i < len(LETTERS) else str(i + 1)
-        L.append(f"<b>{tag}. {esc(r['symbol'])}</b>")
+        L.append(f"<b>{i + 1}. {esc(r['symbol'])}</b>")
         L.append(f"    Enter at market: {_fmt_money(r['entry_lo'])} – "
                  f"{_fmt_money(r['entry_hi'])}")
         L.append(f"    SL @{config.V4_STOP_LOSS_PCT:.0f}%: "
                  f"{_fmt_money(r['sl_lo'])} – {_fmt_money(r['sl_hi'])}")
-        L.append(f"    Target @{config.V4_TARGET_PCT:.0f}%: "
-                 f"{_fmt_money(r['tgt_lo'])} – {_fmt_money(r['tgt_hi'])}")
+        L.append(f"    Book at +{config.V4_TARGET_PCT:.0f}%: "
+                 f"{_fmt_money(r['tgt_lo'])} – {_fmt_money(r['tgt_hi'])} "
+                 f"<i>(do not place yet)</i>")
         L.append("")
 
-    L.append("<i>Place SL and target as resting orders straight after the "
-             "buy fills. Both may trigger intra-day.</i>")
+    L.append(f"<i>Place the SL as a resting order once the buy fills — it is "
+             f"inside the {config.PRICE_BAND_PCT:.0f}% band and will be "
+             f"accepted.</i>")
+    L.append("")
+    L.append(f"<i>The +{config.V4_TARGET_PCT:.0f}% target CANNOT be placed "
+             f"today. F&amp;O scrips have a dynamic price band of "
+             f"±{config.PRICE_BAND_PCT:.0f}% of the previous close and the "
+             f"exchange rejects anything outside it. The evening note will "
+             f"tell you the day each target comes within range.</i>")
     if sheet["dropped"]:
         L.append("")
         L.append("<b>Excluded by surveillance:</b>")
@@ -380,78 +445,62 @@ def render_entry_sheet(sheet: dict) -> str:
     return "\n".join(L).strip()
 
 
+EXIT_LABEL = {
+    "STOP": "STOPLOSS",
+    "TARGET": "Target exit",
+    "ROLLOVER": "Momentum exit",
+}
+
+
 def render(rpt: Report) -> str:
-    """Telegram HTML. Kept narrow -- it is read on a phone."""
+    """
+    Telegram HTML, deliberately terse -- it is read on a phone before
+    market open and every line should map to an action or a number.
+
+    Five sections, each shown only when it has content:
+        header · month to date · exits today · sell orders ·
+        buy orders · continue to hold
+    """
     from alerts import esc
-    L = []
-    L.append(f"<b>Momentum Tracker — {rpt.as_of:%d-%m-%y}</b>")
-    L.append(f"<i>Basket from the {rpt.expiry:%d-%m-%y} expiry, "
-             f"entered {rpt.entry_date:%d-%m-%y}</i>")
-    L.append("")
+    L = [f"<b>Momentum Tracker — {rpt.as_of:%d-%m-%y}</b>", ""]
 
     sign = "+" if rpt.mtd_return_pct >= 0 else ""
     L.append(f"<b>Month to date: {sign}{rpt.mtd_return_pct:.2f}%</b>")
-    L.append("<i>equal weight, perfect execution, before costs</i>")
     L.append("")
 
     today_exits = [e for e in rpt.exits if e.exit_date == rpt.as_of]
     if today_exits:
-        L.append("<b>EXITED TODAY — already filled by your broker</b>")
+        L.append("<b>Exits today</b>")
         for e in today_exits:
             s = "+" if e.pnl_pct >= 0 else ""
-            L.append(f"  {esc(e.symbol)} — {e.reason} @ {_fmt_money(e.exit_px)} "
-                     f"({s}{e.pnl_pct:.1f}%)")
+            L.append(f"{esc(e.symbol)} — {EXIT_LABEL.get(e.reason, e.reason)} "
+                     f"@ {_fmt_money(e.exit_px)} ({s}{e.pnl_pct:.1f}%)")
         L.append("")
 
-    if rpt.to_buy:
-        L.append("<b>BUY at tomorrow's open</b>")
-        for sym in rpt.to_buy:
-            L.append(f"  {esc(sym)} — market on open, then set "
-                     f"{config.V4_STOP_LOSS_PCT:.0f}% stop / "
-                     f"{config.V4_TARGET_PCT:.0f}% target as resting orders")
+    if rpt.sell_orders:
+        L.append("<b>SELL ORDERS - PLACE NOW</b>")
+        for o in rpt.sell_orders:
+            if o["kind"] == "TARGET":
+                L.append(f"{esc(o['symbol'])} - TARGET - PLACE AT LIMIT "
+                         f"{_fmt_money(o['limit'])}")
+            else:
+                L.append(f"{esc(o['symbol'])} - MOMENTUM - AT MARKET")
         L.append("")
 
-    if rpt.to_sell:
-        L.append("<b>SELL at tomorrow's open</b>")
-        for sym in rpt.to_sell:
-            L.append(f"  {esc(sym)} — dropped out of the basket")
+    if rpt.buy_orders:
+        L.append("<b>BUY ORDERS - PLACE NOW</b>")
+        for o in rpt.buy_orders:
+            L.append(f"{esc(o['symbol'])} - MARKET RANGE "
+                     f"{_fmt_money(o['lo'])}-{_fmt_money(o['hi'])} "
+                     f"STOP LOSS @{config.V4_STOP_LOSS_PCT:.0f}% - "
+                     f"{_fmt_money(o['sl_lo'])}-{_fmt_money(o['sl_hi'])}")
         L.append("")
 
     if rpt.holdings:
-        L.append(f"<b>HOLDING ({len(rpt.holdings)})</b>")
+        L.append("<b>CONTINUE TO HOLD</b>")
         for h in sorted(rpt.holdings, key=lambda x: -x.pnl_pct):
             s = "+" if h.pnl_pct >= 0 else ""
-            L.append(f"  {esc(h.symbol)}  {_fmt_money(h.last)}  "
-                     f"({s}{h.pnl_pct:.1f}%)  stop {_fmt_money(h.stop)}")
-        L.append("")
-
-    earlier = [e for e in rpt.exits if e.exit_date != rpt.as_of]
-    if earlier:
-        wins = sum(1 for e in earlier if e.pnl_pct > 0)
-        L.append(f"<i>Earlier this month: {len(earlier)} closed, "
-                 f"{wins} profitable</i>")
-        L.append("")
-
-    if rpt.flagged_actions:
-        L.append("<b>⚠ Corporate actions needing review</b>")
-        for f in rpt.flagged_actions:
-            L.append(f"  {esc(f['symbol'])} {f['date']} — "
-                     f"{esc(f['classification'])}, ratio "
-                     f"{f['adjustment_ratio']:.4f} vs observed "
-                     f"{f['observed_ratio']:.4f}")
-        L.append("")
-
-    if rpt.veto_dropped:
-        L.append("<b>Surveillance veto</b>")
-        for sym, why in rpt.veto_dropped:
-            L.append(f"  {esc(sym)} excluded — {esc(why)}")
-        L.append("")
-    if not rpt.veto_ran:
-        L.append("<i>⚠ Surveillance check did not run (feed unavailable)</i>")
-        L.append("")
-
-    if rpt.empty_slots > 0:
-        L.append(f"<i>⚠ {rpt.empty_slots} slot(s) unfilled — no eligible "
-                 f"name passed the sector cap</i>")
+            L.append(f"{esc(h.symbol)}  {_fmt_money(h.last)}  "
+                     f"({s}{h.pnl_pct:.1f}%)")
 
     return "\n".join(L).strip()

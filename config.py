@@ -298,6 +298,35 @@ CORP_ACTION_UNKNOWN_POLICY = "heuristic"
 # around the signal-day close rather than a single number.
 ENTRY_BAND_PCT = 2.0
 
+# Dynamic price band for F&O scrips: an order more than this far from the
+# previous close is REJECTED by the exchange. Verified 01-Aug-2026: all
+# 208 names in fo_mktlots.csv show "No Band" in NSE's sec_list.csv, i.e.
+# no static circuit -- but the dynamic band still applies at order entry
+# (SEBI/HO/MRD/TPD-1/P/CIR/2024/58, NSE/FAOP/64995).
+#
+# Consequence: the 40% target CANNOT be placed as a resting order on day
+# one. It only becomes placeable once the stock is within this band of
+# the target. The evening note says when.
+PRICE_BAND_PCT = 10.0
+
+
+# ---------------------------------------------------------------------------
+# LEDGER
+#
+# Append-only history of every note sent: exits, orders issued, holdings
+# and MTD, one JSON record per run. This is the audit trail -- what the
+# system actually told you to do, on the day it told you, before you knew
+# how it turned out. Deliberately NOT gitignored: it is history, not
+# regenerable output.
+#
+# The rendered message is archived alongside it so you can see exactly
+# what landed on your phone.
+# ---------------------------------------------------------------------------
+
+LEDGER_FILE = os.path.join(DATA_DIR, "ledger.jsonl")
+LEDGER_ARCHIVE_DIR = os.path.join(DATA_DIR, "notes")
+LEDGER_ENABLED = True
+
 
 # ---------------------------------------------------------------------------
 # PRE-ORDER SURVEILLANCE VETO (surveillance.py)

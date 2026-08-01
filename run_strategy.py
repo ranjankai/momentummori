@@ -191,6 +191,40 @@ def cmd_backtest(args):
         print(f"Saved -> {out}")
 
 
+def cmd_history(args):
+    """Look back at what the system actually told you to do."""
+    import ledger
+
+    if args.trades:
+        rows = ledger.closed_trades()
+        if not rows:
+            print("No closed trades recorded yet.")
+            return
+        print(f"{'exit date':<12}{'symbol':<14}{'reason':<10}"
+              f"{'entry':>10}{'exit':>10}{'P&L %':>9}")
+        for t in rows:
+            print(f"{t['exit_date']:<12}{t['symbol']:<14}{t['reason']:<10}"
+                  f"{t['entry']:>10,.2f}{t['exit']:>10,.2f}{t['pnl_pct']:>9.2f}")
+        tot = sum(t["pnl_pct"] for t in rows)
+        wins = sum(1 for t in rows if t["pnl_pct"] > 0)
+        print(f"\n{len(rows)} trades | {wins} winners "
+              f"({wins / len(rows) * 100:.0f}%) | sum {tot:+.2f}%")
+        return
+
+    rows = ledger.monthly_summary()
+    if not rows:
+        print("Ledger is empty -- run `daily` at least once.")
+        return
+    print(f"{'expiry':<12}{'last run':<12}{'return %':>10}"
+          f"{'closed':>8}{'wins':>6}{'win %':>8}{'open':>6}")
+    for r in rows:
+        wr = f"{r['win_rate']:.0f}" if r["win_rate"] is not None else "-"
+        print(f"{r['expiry']:<12}{r['last_run']:<12}{r['return_pct']:>10.2f}"
+              f"{r['closed']:>8}{r['wins']:>6}{wr:>8}{r['open']:>6}")
+    print(f"\nAccrued across {len(rows)} month(s): "
+          f"{sum(r['return_pct'] for r in rows):+.2f}%")
+
+
 def cmd_sheet(args):
     """Monthly order sheet. Run on the evening of expiry."""
     import alerts
@@ -238,6 +272,12 @@ def cmd_daily(args):
         raise
 
     print(text)
+
+    # Record BEFORE sending: the note is the decision, delivery is just
+    # transport. A Telegram outage must not erase the audit trail.
+    import ledger
+    ledger.record(report, rendered=text, kind="daily")
+
     if args.no_send:
         print("\n(--no-send: not delivered)")
         return
@@ -252,6 +292,11 @@ def main():
     p = argparse.ArgumentParser(description="V4 momentum strategy")
     p.add_argument("-v", "--verbose", action="store_true")
     sub = p.add_subparsers(dest="cmd", required=True)
+
+    h = sub.add_parser("history", help="look back at recorded monthly actions")
+    h.add_argument("--trades", action="store_true",
+                   help="list every closed trade instead of the monthly summary")
+    h.set_defaults(func=cmd_history)
 
     sh = sub.add_parser("sheet", help="monthly order sheet, run on expiry evening")
     sh.add_argument("--expiry", required=True, help="YYYY-MM-DD (the expiry date)")

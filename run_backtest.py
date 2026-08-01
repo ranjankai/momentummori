@@ -21,6 +21,7 @@ fetch for them.
 """
 
 import argparse
+import json
 import logging
 import logging.handlers
 import os
@@ -60,8 +61,11 @@ def make_ranking_fn(top_n: int):
         as_of = month_start - timedelta(days=1)  # rank using only prior data -- no look-ahead
         try:
             result = pipeline.run(as_of=as_of, persist_cache=False)
-        except RuntimeError as exc:
-            logger.error("Ranking failed for %s: %s", month_start, exc)
+        except (RuntimeError, nse_client.NseFetchError) as exc:
+            # Don't let one bad month (data gap, unexpected NSE outage,
+            # holiday edge case) kill a multi-month backtest -- skip it
+            # and keep going so partial results are still useful.
+            logger.error("Ranking failed for %s, skipping that month: %s", month_start, exc)
             return []
         return [r["symbol"] for r in result["rankings"][:top_n]]
     return _ranking_fn
@@ -114,6 +118,10 @@ def main():
     parser.add_argument("--end", required=True, type=parse_date, help="YYYY-MM-DD, last month included")
     parser.add_argument("--top-n", type=int, default=config.PORTFOLIO_SIZE)
     parser.add_argument("--benchmark-csv", default=None, help="CSV with date,close columns")
+    parser.add_argument(
+        "--output", default=os.path.join(config.DATA_DIR, "backtest_result.json"),
+        help="Where to also save the full result as JSON (default: data/backtest_result.json)",
+    )
     args = parser.parse_args()
 
     setup_logging()
@@ -143,6 +151,21 @@ def main():
         "not Altcase's undisclosed exact formula -- treat as a methodology "
         "sanity-check, not a reconciliation of the deck's +61.2% figure."
     )
+
+    os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
+    with open(args.output, "w") as f:
+        json.dump(
+            {
+                "start": str(args.start),
+                "end": str(args.end),
+                "top_n": args.top_n,
+                "benchmark_csv": args.benchmark_csv,
+                **result,
+            },
+            f,
+            indent=2,
+        )
+    print(f"\nFull result saved to {args.output}")
 
 
 if __name__ == "__main__":

@@ -191,10 +191,49 @@ def cmd_backtest(args):
         print(f"Saved -> {out}")
 
 
+def cmd_daily(args):
+    """
+    Evening note: what exited today, what to order tomorrow, and MTD ROI.
+
+    Intended to run unattended from Windows Task Scheduler after the
+    bhavcopy is published (~18:00-18:30 IST). Any failure is reported to
+    Telegram rather than dying silently -- silence and "no trades today"
+    must not look the same on your phone.
+    """
+    import alerts
+    import daily_report
+
+    as_of = (datetime.strptime(args.date, "%Y-%m-%d").date()
+             if args.date else date.today())
+    try:
+        report = daily_report.build(as_of)
+        text = daily_report.render(report)
+    except Exception as exc:
+        logging.getLogger("momentum_tracker").exception("Daily report failed")
+        alerts.send_failure(f"daily report for {as_of}", exc)
+        raise
+
+    print(text)
+    if args.no_send:
+        print("\n(--no-send: not delivered)")
+        return
+    if alerts.send(text):
+        print(f"\nDelivered to Telegram chat {config.TELEGRAM_CHAT_ID}")
+    else:
+        print("\nDELIVERY FAILED -- see logs/app.log", file=sys.stderr)
+        sys.exit(2)
+
+
 def main():
     p = argparse.ArgumentParser(description="V4 momentum strategy")
     p.add_argument("-v", "--verbose", action="store_true")
     sub = p.add_subparsers(dest="cmd", required=True)
+
+    d = sub.add_parser("daily", help="build and send the evening basket note")
+    d.add_argument("--date", help="YYYY-MM-DD (defaults to today)")
+    d.add_argument("--no-send", action="store_true",
+                   help="print the note without sending it to Telegram")
+    d.set_defaults(func=cmd_daily)
 
     b = sub.add_parser("basket", help="generate the basket for one expiry")
     b.add_argument("--expiry", required=True, help="YYYY-MM-DD (the expiry date)")

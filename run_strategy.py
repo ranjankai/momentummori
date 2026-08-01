@@ -47,7 +47,7 @@ def _snapshot(expiry: date, symbols, sector_map):
             f"{expiry} has no cash-market bhavcopy -- is it a trading day?")
     fo_raw = nse_client.fetch_fo_bhavcopy(expiry)
     fo = scoring.normalize_fo_columns(fo_raw)
-    sig = strategy.compute_signals(hist, fo, expiry, symbols)
+    sig = strategy.compute_signals_cached(hist, fo, expiry, symbols)
     basket, full = strategy.rank_universe(sig, sector_map)
     return basket, full, hist
 
@@ -191,6 +191,28 @@ def cmd_backtest(args):
         print(f"Saved -> {out}")
 
 
+def _is_trading_day(day: date) -> bool:
+    """
+    True if NSE published a cash-market bhavcopy for `day`.
+
+    Weekends are rejected without a network call. Otherwise we ask
+    nse_client, which consults the disk cache first and the negative
+    (.nodata) cache after that, so a known holiday costs nothing on
+    repeat runs. Any error other than "no data" is treated as a trading
+    day so a transient NSE outage still surfaces as a real failure alert
+    rather than being silently swallowed.
+    """
+    if day.weekday() >= 5:
+        return False
+    try:
+        nse_client.fetch_cm_bhavcopy(day)
+        return True
+    except nse_client.NseNoDataError:
+        return False
+    except nse_client.NseFetchError:
+        return True
+
+
 def cmd_perf(args):
     """Portfolio performance note. Run on expiry evening, after `sheet`."""
     import alerts
@@ -280,6 +302,14 @@ def cmd_daily(args):
 
     as_of = (datetime.strptime(args.date, "%Y-%m-%d").date()
              if args.date else date.today())
+
+    # Trading-day guard. On a weekend or exchange holiday NSE publishes no
+    # bhavcopy, which is NOT a failure -- exit quietly rather than firing
+    # an alarm every Saturday and training you to ignore alerts.
+    if not args.force and not _is_trading_day(as_of):
+        print(f"{as_of} is not a trading day (no bhavcopy) — nothing sent.")
+        return
+
     try:
         report = daily_report.build(as_of)
         text = daily_report.render(report)
@@ -328,6 +358,8 @@ def main():
     d.add_argument("--date", help="YYYY-MM-DD (defaults to today)")
     d.add_argument("--no-send", action="store_true",
                    help="print the note without sending it to Telegram")
+    d.add_argument("--force", action="store_true",
+                   help="run even if the date is not a trading day")
     d.set_defaults(func=cmd_daily)
 
     b = sub.add_parser("basket", help="generate the basket for one expiry")

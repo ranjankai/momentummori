@@ -271,6 +271,42 @@ def load_price_history(as_of: date, symbols, days: int = None) -> dict:
 # Signals
 # ---------------------------------------------------------------------------
 
+def signals_cache_path(snapshot: date) -> str:
+    d = os.path.join(config.DATA_DIR, "signals_cache")
+    os.makedirs(d, exist_ok=True)
+    return os.path.join(d, f"sig_{snapshot:%Y%m%d}.csv")
+
+
+def compute_signals_cached(price_hist: dict, fo_today: pd.DataFrame,
+                           snapshot: date, symbols, flagged: list = None):
+    """
+    compute_signals with a disk cache keyed on the snapshot date.
+
+    A past expiry's signals are a pure function of bhavcopy that is
+    already published, so they never change. Caching turns a 13-month
+    backtest from ~200s of recomputation into a few seconds on re-runs,
+    which matters because the run is now doing network + LLM work inside
+    split_adjust.
+
+    Cache misses fall through to the real computation. A corrupt or
+    unreadable cache entry is ignored rather than fatal.
+    """
+    path = signals_cache_path(snapshot)
+    if os.path.exists(path):
+        try:
+            df = pd.read_csv(path, index_col=0)
+            logger.info("Signals cache hit for %s (%d symbols)", snapshot, len(df))
+            return df
+        except (OSError, ValueError) as exc:
+            logger.warning("Unreadable signals cache %s: %s", path, exc)
+    df = compute_signals(price_hist, fo_today, snapshot, symbols, flagged=flagged)
+    try:
+        df.to_csv(path)
+    except OSError as exc:
+        logger.warning("Could not write signals cache %s: %s", path, exc)
+    return df
+
+
 def compute_signals(price_hist: dict, fo_today: pd.DataFrame, snapshot: date,
                     symbols, flagged: list = None) -> pd.DataFrame:
     """

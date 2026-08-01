@@ -22,3 +22,4 @@ data/*.json
 # LLM and NSE corporate-feed response caches (regenerable)
 data/llm_cache/
 data/corp_cache/
+data/signals_cache/

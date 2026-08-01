@@ -272,7 +272,7 @@ def build(as_of: date, session=None) -> Report:
     import nse_client
     import scoring
     fo = scoring.normalize_fo_columns(nse_client.fetch_fo_bhavcopy(expiry))
-    signals = strategy.compute_signals(hist, fo, expiry, symbols)
+    signals = strategy.compute_signals_cached(hist, fo, expiry, symbols)
     basket, full = strategy.rank_universe(signals, sectors)
     basket_symbols = basket["symbol"].tolist()
 
@@ -405,7 +405,7 @@ def build_entry_sheet(expiry: date, session=None) -> dict:
     if expiry not in hist:
         raise strategy.StrategyError(f"No bhavcopy for expiry {expiry}")
     fo = scoring.normalize_fo_columns(nse_client.fetch_fo_bhavcopy(expiry))
-    signals = strategy.compute_signals(hist, fo, expiry, symbols)
+    signals = strategy.compute_signals_cached(hist, fo, expiry, symbols)
     basket, full = strategy.rank_universe(signals, sectors)
 
     kept, dropped, added, veto_ran = (basket["symbol"].tolist(), [], [], True)

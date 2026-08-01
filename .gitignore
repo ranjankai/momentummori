@@ -15,3 +15,10 @@ data/*.json
 
 # One-off analysis exports
 *.xlsx
+
+# Secrets -- Telegram bot token, Gemini API key
+.env
+
+# LLM and NSE corporate-feed response caches (regenerable)
+data/llm_cache/
+data/corp_cache/

@@ -1,4 +1,13 @@
-# Web server is stdlib (wsgiref) — no Flask dependency needed.
-pandas==2.2.2
-requests==2.32.3
-pytest==8.2.2
+# Web server is stdlib (wsgiref) -- no Flask dependency needed.
+#
+# Pinned to the versions actually installed on the Windows venv as of
+# 01-Aug-2026. Requires Python >= 3.11 (pandas 3.x); the project runs on
+# 3.13.14 locally.
+#
+# NOTE: the verified backtest table in CONTEXT.md was produced under an
+# earlier, unrecorded pandas 2.x. These pins have NOT yet been shown to
+# reproduce those numbers -- see CONTEXT.md "Pending Tasks".
+pandas==3.0.5
+numpy==2.5.1
+requests==2.34.2
+pytest==9.1.1

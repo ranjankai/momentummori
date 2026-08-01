@@ -281,6 +281,17 @@ CORP_ACTION_LLM_ENABLED = True
 # (e.g. BSE's 2:1 bonus implies 0.3333 against an observed 0.3499).
 CORP_ACTION_RECONCILE_TOLERANCE = 0.15
 
+# What to do when the classifier cannot determine a ratio (UNKNOWN) --
+# in practice, demergers, whose filed subject line carries no ratio.
+#   "heuristic"  -> fall back to the legacy blind back-adjustment by the
+#                   observed ratio. Preserves the behaviour the verified
+#                   backtest table in CONTEXT.md was produced under.
+#   "no_adjust"  -> leave the series alone and flag it.
+# Neither is correct for a demerger: adjusting fully treats real value
+# leaving the company as mechanics, not adjusting treats it as a trading
+# loss. Default preserves comparability; flip it once you have decided.
+CORP_ACTION_UNKNOWN_POLICY = "heuristic"
+
 
 # ---------------------------------------------------------------------------
 # PRE-ORDER SURVEILLANCE VETO (surveillance.py)

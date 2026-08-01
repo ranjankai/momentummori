@@ -154,22 +154,76 @@ def load_sector_map() -> dict:
 # Prices
 # ---------------------------------------------------------------------------
 
-def split_adjust(closes: list) -> list:
+def split_adjust(closes: list, symbol: str = None, dates: list = None,
+                 session=None, flagged: list = None) -> list:
     """
-    Back-adjust a close series for splits/bonuses. NSE bhavcopy is NOT
-    corporate-action adjusted: MCX 5:1 on 02-Jan-2026 shows as a one-day
-    -80% move and would otherwise be scored as the universe's worst
-    momentum AND its highest volatility. Both were wrong.
+    Back-adjust a close series for corporate actions.
+
+    NSE bhavcopy is NOT corporate-action adjusted: MCX 5:1 on 02-Jan-2026
+    shows as a one-day -80% move and would otherwise be scored as the
+    universe's worst momentum AND its highest volatility. Both were wrong.
+
+    When `symbol` and `dates` are supplied and the classifier is enabled,
+    each ratio breach is explained against NSE's actual corporate action
+    filings (see corporate_actions.py) rather than blindly assumed to be
+    a split. That distinction matters: without it, a genuine -80% collapse
+    is silently laundered into a clean series and the stock then scores as
+    high-volatility and enters the basket.
+
+    Without those arguments the legacy heuristic applies unchanged, so
+    existing callers and tests keep their exact previous behaviour.
+
+    `flagged`, if given, receives the classifier result dict for any
+    breach whose ratio did not reconcile with the observed move, so the
+    caller can surface it in the evening note.
     """
     out = list(closes)
+    use_classifier = bool(symbol and dates and config.CORP_ACTION_LLM_ENABLED
+                          and len(dates) == len(closes))
+
     for i in range(1, len(out)):
         if out[i - 1] <= 0:
             continue
         ratio = out[i] / out[i - 1]
-        if ratio < config.V4_SPLIT_RATIO_LOW or ratio > config.V4_SPLIT_RATIO_HIGH:
-            logger.debug("Corporate action detected at index %d (ratio %.3f)", i, ratio)
-            for j in range(i):
-                out[j] *= ratio
+        if config.V4_SPLIT_RATIO_LOW <= ratio <= config.V4_SPLIT_RATIO_HIGH:
+            continue
+
+        adjustment = ratio          # legacy default
+        if use_classifier:
+            try:
+                import corporate_actions
+                verdict = corporate_actions.classify(
+                    symbol, dates[i], out[i - 1], out[i], session=session)
+            except Exception as exc:
+                # Classification must never abort a strategy run.
+                logger.error("Classifier failed for %s at %s (%s); using "
+                             "heuristic", symbol, dates[i], exc)
+                verdict = None
+
+            if verdict is not None:
+                kind = verdict["classification"]
+                if verdict.get("flagged") and flagged is not None:
+                    flagged.append(verdict)
+                if kind == "GENUINE_MOVE":
+                    logger.info("%s %s: genuine %.1f%% move, NOT adjusted",
+                                symbol, dates[i], (ratio - 1) * 100)
+                    continue
+                if kind == "UNKNOWN":
+                    if config.CORP_ACTION_UNKNOWN_POLICY == "no_adjust":
+                        logger.warning("%s %s: unexplained breach, not adjusted",
+                                       symbol, dates[i])
+                        continue
+                    logger.warning("%s %s: unexplained breach, falling back to "
+                                   "heuristic ratio %.4f", symbol, dates[i], ratio)
+                else:
+                    adjustment = verdict["adjustment_ratio"]
+                    logger.info("%s %s: %s, adjusting prior closes by %.4f",
+                                symbol, dates[i], kind, adjustment)
+
+        logger.debug("Corporate action at index %d (ratio %.3f -> adj %.4f)",
+                     i, ratio, adjustment)
+        for j in range(i):
+            out[j] *= adjustment
     return out
 
 
@@ -218,8 +272,13 @@ def load_price_history(as_of: date, symbols, days: int = None) -> dict:
 # ---------------------------------------------------------------------------
 
 def compute_signals(price_hist: dict, fo_today: pd.DataFrame, snapshot: date,
-                    symbols) -> pd.DataFrame:
-    """One row per symbol: volatility, rollover %, cost of carry, DMAs."""
+                    symbols, flagged: list = None) -> pd.DataFrame:
+    """
+    One row per symbol: volatility, rollover %, cost of carry, DMAs.
+
+    `flagged`, if given, collects corporate-action verdicts whose ratio
+    did not reconcile with the observed price move, for the evening note.
+    """
     dates = sorted(price_hist)
     spot = price_hist[snapshot]["close_price"] if snapshot in price_hist else None
     if spot is None:
@@ -227,7 +286,7 @@ def compute_signals(price_hist: dict, fo_today: pd.DataFrame, snapshot: date,
 
     rows = []
     for sym in symbols:
-        closes, vols = [], []
+        closes, vols, close_dates = [], [], []
         for d in dates:
             frame = price_hist[d]
             if sym not in frame.index:
@@ -236,10 +295,12 @@ def compute_signals(price_hist: dict, fo_today: pd.DataFrame, snapshot: date,
             if pd.isna(c) or c <= 0:
                 continue
             closes.append(float(c))
+            close_dates.append(d)
             vols.append(frame.at[sym, "volume"] if "volume" in frame.columns else np.nan)
         if len(closes) < config.V4_VOL_LOOKBACK_DAYS - 10:
             continue
-        closes = split_adjust(closes)
+        closes = split_adjust(closes, symbol=sym, dates=close_dates,
+                              flagged=flagged)
         s = pd.Series(closes)
         rets = s.pct_change().dropna().tail(config.V4_VOL_LOOKBACK_DAYS)
         rows.append({

@@ -1,0 +1,254 @@
+symbol,sector
+RELIANCE,Oil & Gas/Conglomerate
+TCS,IT
+HDFCBANK,Private Bank
+ICICIBANK,Private Bank
+INFY,IT
+SBIN,PSU Bank
+BHARTIARTL,Telecom
+KOTAKBANK,Private Bank
+LT,Capital Goods/Infra
+AXISBANK,Private Bank
+ITC,FMCG
+HINDUNILVR,FMCG
+BAJFINANCE,NBFC
+MARUTI,Auto
+SUNPHARMA,Pharma
+TITAN,Consumer Durables/Retail
+ULTRACEMCO,Cement
+ASIANPAINT,Consumer/Paints
+NESTLEIND,FMCG
+WIPRO,IT
+ADANIENT,Metals/Mining
+ADANIPORTS,Infra/Logistics
+POWERGRID,Power/Utilities
+NTPC,Power/Utilities
+ONGC,Oil & Gas
+TATASTEEL,Metals/Mining
+TATAMOTORS,Auto
+JSWSTEEL,Metals/Mining
+HCLTECH,IT
+TECHM,IT
+COALINDIA,Metals/Mining
+GRASIM,Cement/Diversified
+BPCL,Oil & Gas
+DIVISLAB,Pharma
+DRREDDY,Pharma
+CIPLA,Pharma
+EICHERMOT,Auto
+HEROMOTOCO,Auto
+BAJAJ-AUTO,Auto
+BAJAJFINSV,NBFC
+HDFCLIFE,Insurance
+SBILIFE,Insurance
+INDUSINDBK,Private Bank
+FEDERALBK,Private Bank
+BANDHANBNK,Private Bank
+IDFCFIRSTB,Private Bank
+PNB,PSU Bank
+CANBK,PSU Bank
+AUBANK,Private Bank
+POLYCAB,Capital Goods/Cables
+SOLARINDS,Specialty Chem/Defence
+LTF,NBFC
+LTIM,IT
+RADICO,Consumer/Liquor
+GMRAIRPORT,Infra/Aviation
+NYKAA,Consumer Internet
+ETERNAL,Consumer Internet
+PRESTIGE,Realty
+DLF,Realty
+GODREJPROP,Realty
+OBEROIRLTY,Realty
+LODHA,Realty
+PHOENIXLTD,Realty
+VOLTAS,Consumer Durables
+HAVELLS,Consumer Durables
+DIXON,Consumer Durables
+TRENT,Retail
+ABFRL,Retail
+PAGEIND,Consumer/Apparel
+PIDILITIND,Specialty Chem
+BERGEPAINT,Consumer/Paints
+UPL,Agrochemicals
+PIIND,Specialty Chem
+SRF,Specialty Chem
+DEEPAKNTR,Specialty Chem
+TATACHEM,Chemicals
+AMBUJACEM,Cement
+SHREECEM,Cement
+ACC,Cement
+JINDALSTEEL,Metals/Mining
+HINDALCO,Metals/Mining
+VEDANTA,Metals/Mining
+NMDC,Metals/Mining
+SAIL,Metals/Mining
+BEL,Defence/PSU Industrial
+HAL,Defence/PSU Industrial
+BHEL,Capital Goods
+SIEMENS,Capital Goods
+ABB,Capital Goods
+CUMMINSIND,Capital Goods
+M&M,Auto
+ASHOKLEY,Auto
+TVSMOTOR,Auto
+MOTHERSON,Auto Ancillary
+BOSCHLTD,Auto Ancillary
+MRF,Auto Ancillary
+APOLLOTYRE,Auto Ancillary
+BALKRISHNA,Auto Ancillary
+IRCTC,Realty/Infra
+CONCOR,Realty/Infra
+INDIGO,Aviation
+ZOMATO,Consumer Internet
+PAYTM,Consumer Internet
+POLICYBZR,Consumer Internet
+NAUKRI,Consumer Internet
+PERSISTENT,IT
+COFORGE,IT
+MPHASIS,IT
+LTTS,IT
+TATAELXSI,IT
+CROMPTON,Consumer Durables
+DABUR,FMCG
+MARICO,FMCG
+COLPAL,FMCG
+GODREJCP,FMCG
+TATACONSUM,FMCG
+UBL,Consumer/Liquor
+MCDOWELL-N,Consumer/Liquor
+INDHOTEL,Hospitality
+JUBLFOOD,Consumer/QSR
+PVRINOX,Media/Entertainment
+ICICIPRULI,Insurance
+ICICIGI,Insurance
+SBICARD,NBFC
+CHOLAFIN,NBFC
+MUTHOOTFIN,NBFC
+MANAPPURAM,NBFC
+PFC,NBFC
+RECLTD,NBFC
+IRFC,NBFC
+IREDA,NBFC
+GAIL,Oil & Gas
+IOC,Oil & Gas
+PETRONET,Oil & Gas
+GUJGASLTD,Oil & Gas
+ATGL,Oil & Gas
+ADANIGREEN,Power/Utilities
+ADANIENSOL,Power/Utilities
+ADANIPOWER,Power/Utilities
+TORNTPOWER,Power/Utilities
+TORNTPHARM,Pharma
+LUPIN,Pharma
+AUROPHARMA,Pharma
+ALKEM,Pharma
+BIOCON,Pharma
+GLENMARK,Pharma
+ZYDUSLIFE,Pharma
+LAURUSLABS,Pharma
+SYNGENE,Pharma
+MFSL,NBFC
+LICI,Insurance
+BANKBARODA,PSU Bank
+UNIONBANK,PSU Bank
+INDIANB,PSU Bank
+BANKINDIA,PSU Bank
+IDBI,PSU Bank
+YESBANK,Private Bank
+RBLBANK,Private Bank
+EXIDEIND,Auto Ancillary
+AMARAJABAT,Auto Ancillary
+ASTRAL,Capital Goods
+SUPREMEIND,Capital Goods
+APLAPOLLO,Metals/Mining
+JKCEMENT,Cement
+RAMCOCEM,Cement
+NAVINFLUOR,Specialty Chem
+GNFC,Chemicals
+CHAMBLFERT,Fertilizers
+COROMANDEL,Fertilizers
+KPRMILL,Textiles
+AARTIIND,Specialty Chem
+ESCORTS,Auto
+BHARATFORG,Auto Ancillary
+SUNDRMFAST,Auto Ancillary
+TIINDIA,Capital Goods
+GRINDWELL,Capital Goods
+KEI,Capital Goods/Cables
+RVNL,Realty/Infra
+IRCON,Realty/Infra
+NBCC,Realty/Infra
+NCC,Realty/Infra
+GMDCLTD,Metals/Mining
+GPPL,Infra/Logistics
+JSWENERGY,Power/Utilities
+NHPC,Power/Utilities
+SJVN,Power/Utilities
+CESC,Power/Utilities
+TATAPOWER,Power/Utilities
+INDUSTOWER,Telecom
+IDEA,Telecom
+HFCL,Telecom
+TATACOMM,Telecom
+360ONE,NBFC
+ABCAPITAL,NBFC
+AMBER,Consumer Durables
+ANGELONE,Capital Markets
+APOLLOHOSP,Healthcare
+BAJAJHLDNG,NBFC
+BDL,Defence/PSU Industrial
+BLUESTARCO,Consumer Durables
+BRITANNIA,FMCG
+BSE,Capital Markets
+CAMS,Capital Markets
+CDSL,Capital Markets
+CGPOWER,Capital Goods
+COCHINSHIP,Defence/PSU Industrial
+DALBHARAT,Cement
+DELHIVERY,Infra/Logistics
+DMART,Retail
+FEDERALBNK,Private Bank
+FORCEMOT,Auto
+FORTIS,Healthcare
+GODFRYPHLP,FMCG
+GVT&D,Capital Goods
+HDFCAMC,Capital Markets
+HINDPETRO,Oil & Gas
+HINDZINC,Metals/Mining
+HYUNDAI,Auto
+IEX,Capital Markets
+INOXWIND,Capital Goods
+JINDALSTEL,Metals/Mining
+JIOFIN,NBFC
+KALYANKJIL,Retail
+KAYNES,Capital Goods
+KFINTECH,Capital Markets
+KPITTECH,IT
+LICHSGFIN,NBFC
+LTM,IT
+MANKIND,Pharma
+MAXHEALTH,Healthcare
+MAZDOCK,Defence/PSU Industrial
+MCX,Capital Markets
+MOTILALOFS,Capital Markets
+NAM-INDIA,Capital Markets
+NATIONALUM,Metals/Mining
+OFSS,IT
+OIL,Oil & Gas
+PATANJALI,FMCG
+PGEL,Consumer Durables
+PNBHOUSING,NBFC
+POWERINDIA,Capital Goods
+PREMIERENE,Power/Utilities
+SHRIRAMFIN,NBFC
+SONACOMS,Auto Ancillary
+SUZLON,Capital Goods
+SWIGGY,Consumer Internet
+TMPV,Auto
+UNITDSPR,Consumer/Liquor
+UNOMINDA,Auto Ancillary
+VBL,FMCG
+VEDL,Metals/Mining
+VMM,Consumer Internet
+WAAREEENER,Power/Utilities

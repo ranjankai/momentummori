@@ -366,26 +366,26 @@ def render_performance(perf: dict) -> str:
 
     names = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
              "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
-    L = ["<b>Portfolio performance</b>", ""]
+    L = ["<b>Portfolio performance</b>"]
     for r in months:
         y, m, _ = r["expiry"].split("-")
         sign = "+" if r["return_pct"] >= 0 else ""
         L.append(f"{names[int(m) - 1]} {y}: {sign}{r['return_pct']:.2f}%")
-    L.append("")
 
-    s = "+" if perf["absolute_comp"] >= 0 else ""
-    L.append(f"<b>Total: {s}{perf['absolute_comp']:.2f}% absolute</b>")
-    if abs(perf["absolute_sum"] - perf["absolute_comp"]) >= 0.05:
-        s2 = "+" if perf["absolute_sum"] >= 0 else ""
-        L.append(f"<i>({s2}{perf['absolute_sum']:.2f}% on the additive "
-                 f"convention used by the backtest)</i>")
+    # Headline is the additive sum -- the same convention as the monthly
+    # rows above, so the column visibly adds up. CAGR below is still
+    # derived from the COMPOUNDED figure, which is the only valid base
+    # for annualising.
+    s = "+" if perf["absolute_sum"] >= 0 else ""
+    L.append(f"<b>Total: {s}{perf['absolute_sum']:.2f}% absolute sum</b>")
 
     if perf["cagr"] is not None:
-        s3 = "+" if perf["cagr"] >= 0 else ""
-        L.append(f"<b>CAGR: {s3}{perf['cagr']:.1f}%</b>")
+        s2 = "+" if perf["cagr"] >= 0 else ""
+        note = ""
         if perf["extrapolated"]:
-            L.append(f"<i>⚠ extrapolated from {perf['n_months']} month(s) — "
-                     f"not a track record until 12</i>")
+            note = (f" (⚠ extrapolated from {perf['n_months']} month(s) — "
+                    f"not a track record until 1Y)")
+        L.append(f"<b>CAGR: {s2}{perf['cagr']:.1f}%</b>{note}")
     return "\n".join(L).strip()
 
 

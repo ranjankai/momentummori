@@ -301,7 +301,121 @@ history, not regenerable output. `run_strategy.py history` reads it back.
   genuine collapse being laundered into a clean series, not alpha.
   t-stat 1.30, 8/13 months positive, worst −8.01%.
 
+## Walk-forward test, 02-Aug-2026 — THE LLM TARGET LAYER LOST
+
+Five cycles, real rupees, Rs100 start, Rs10 per slot, compounding inside
+each slot. Baskets from the live V4 ranking. Targets set by hand from the
+53-field payload with tickers anonymised.
+
+| cycle | LLM target, 10% SL | flat 40%, 10% SL | flat 40%, 5% SL |
+|---|---|---|---|
+| Dec-25 -> Jan-26 | -3.04% | -4.88% | -3.28% |
+| Jan-26 -> Feb-26 | +12.60% | +14.20% | +13.77% |
+| Feb-26 -> Mar-26 | -12.66% | -7.87% | **-3.37%** |
+| Mar-26 -> Apr-26 | +10.66% | **+19.17%** | +10.03% |
+| Apr-26 -> May-26 | -0.98% | -1.49% | -0.93% |
+| **Rs100 ->** | **104.49** | **117.49** | **115.90** |
+
+**The configuration that existed before 02-Aug-2026 beat everything built
+that day, by 13 percentage points over five months.**
+
+Why the LLM targets lost: they cap winners. In Mar-Apr eight positions
+were booked at 10-14%; left alone at 40% the same names ran to +19.17%.
+Momentum strategies cannot cap the upside -- 2 target hits in 13 months
+is the DESIGN, not a defect. The flat 40% is not there to be hit often,
+it is there to not get in the way.
+
+Tested whether the missing daily off-momentum judgement explained the
+gap. It did not. Mar-Apr re-run day by day, judging each holding on that
+day's data only: **+9.73%**, i.e. 0.93pp WORSE than targets alone. The
+single off-momentum exit fired sold IDEA at +0.7%; that same position
+went on to hit its +10% target three weeks later. Selling a resting
+stock is exactly what the prompt warns against, and the prompt did not
+prevent it.
+
+### Knowledge Items — 02-Aug-2026
+
+- **STOP-LOSS REGIME SPLIT. The strongest effect measured all day.**
+  Feb-Mar (market -12.5%): 5% stop -3.37%, 10% stop -12.66%.
+  Mar-Apr (rally): 5% stop +10.03%, 10% stop +19.17%.
+  Tight stops win in falling months, wide stops win in rising months,
+  ~9pp in each direction. Bigger than the entire LLM layer. THIS is the
+  next thing to work on -- see Pending Tasks.
+- **A 5% stop triggers on 2.88% of stock-days, a 10% stop on 0.19%**
+  (80,337 stock-days, corporate actions excluded). 93% fewer stop-outs
+  at 10% -- but Feb-2026 shows that is not automatically better.
+- **13.8% of 5%-stop triggers GAP THROUGH the stop**, median -1.84%,
+  worst -30.03%. A stop is a market order; the backtest fills it at the
+  trigger price and so overstates.
+- **F&O dynamic price band is +/-10% of the previous close.** A 40%
+  target CANNOT be placed as a resting order until the stock is up
+  ~27.3% (1.40/1.10). All 208 F&O names show "No Band" in NSE's
+  sec_list.csv -- that means no STATIC circuit, not no constraint. The
+  backtest assumes the target is always resting and therefore overstates
+  target fills. UNRESOLVED, and the one finding from 02-Aug that stands.
+- **Rollover is FROZEN between expiries.** Measured over the Jul-2026
+  cycle: rank correlation with the previous snapshot 0.84-0.95 for three
+  weeks, then breaks in the last ~4 sessions. Mid-cycle rollover has
+  -0.1 rank correlation with the expiry value -- unrelated, not a weak
+  version. Derivatives are unusable for any mid-month decision. This is
+  why ROLLOVER_LOOKBACK_DAYS exists.
+- **Feb-2026 was a market crash, not a strategy failure.** F&O universe
+  median -12.50%, 93% of 207 names negative. Our -12.66% tracked it.
+- **A manually-run comparison basket was FLAT (+0.03%) that same month.**
+  Zero overlap with ours; their picks ranked 42nd-197th in our universe.
+  Median 63d volatility: theirs 28.2 (= universe median 27.5), ours 45.9.
+  Their stops ~4.5%, targets ~9%, three of which hit. We invert the
+  deck's "volatility-aware ranking" -- we buy the MOST volatile names.
+  February is what that costs in a down month.
+- **Redeployment is roughly a wash** (flat 40%, 10% SL): Dec -4.88 vs
+  -5.84, Jan +14.20 vs +13.03, Feb -7.87 vs -7.30. Helps slightly when
+  falling, hurts when rising -- the replacement is by then a weaker name.
+- **NSE publishes a FORWARD holiday feed**
+  (/api/holiday-master?type=trading). known_trading_days() is inferred
+  from cached bhavcopy and cannot holiday-check a FUTURE expiry.
+  Nov-2026 is the live case: last Tuesday is 24-Nov, an F&O holiday, so
+  expiry is Mon 23-Nov.
+- **Liquidity floor added** (MIN_TURNOVER_CRORE). Measured: median
+  Rs 183cr, min Rs 34cr, zero breaches -- F&O eligibility already
+  screens hard, but the check now exists rather than being claimed.
+- **Additive return understates reality.** Feb-Mar: -11.43% additive vs
+  -12.66% actual rupees. After a slot loses, the replacement is bought
+  with the reduced capital, so its gains are on a smaller base.
+
+### Architecture changes, 02-Aug-2026
+
+- **One simulator.** daily_report carried a second copy of every trading
+  rule plus its own Position/Exit classes. simulate_month now returns
+  open_positions/exits/to_buy with ORIGINAL cost bases, snapshotted
+  before the carry-forward branch re-marks them. Found in the process:
+  carry_forward=False force-sells at the final day's OPEN and understated
+  cycle return by 0.30pp; a mid-month view must mark to the CLOSE.
+- **Backtest REMOVED from the live CLI** (legacy/backtest_cmd.py). It was
+  the only caller driving a second code path.
+- **legacy/** holds app.py, pipeline.py, backtest.py, run_backtest.py,
+  static/ and their tests. Live suite 14 tests, legacy suite 10.
+- Four LLM call sites exist: corporate_actions.classify (KEEP -- 20/20
+  on the labelled set, the only one with evidence), llm_judgment
+  target_for / exit_judgement / choose_candidate (all three UNPROVEN and
+  measured NEGATIVE above).
+
 ## Pending Tasks
+
+- **REVERT V4_TARGET_PCT to 40 and V4_STOP_LOSS_PCT to 5**, and set
+  LLM_TARGET_ENABLED / LLM_EXIT_ENABLED / LLM_CANDIDATE_ENABLED to False.
+  As of 02-Aug-2026 they are 40->set-to-40? NO: config currently holds
+  V4_STOP_LOSS_PCT = 10.0 and all three LLM flags True. The five-cycle
+  test says that configuration is 13pp worse. NOT YET REVERTED.
+- **REGIME-PEGGED STOP -- the next piece of work.** Choose 5% or 10% on
+  expiry day, before entry, from data available then. Candidate signals,
+  none yet implemented: NIFTY vs its own 200-day; universe median 63d
+  volatility (27.5 into Feb, 33.6 into Apr -- already computed in
+  rank_universe); breadth, % of the 208 above their 200-day; India VIX
+  on the expiry close. Test each against all 13 cycles and ask whether
+  any would have called February. This is worth more than everything
+  else on this list.
+- **Model the +/-10% price band in the backtest.** Targets currently fill
+  on any day whose high touches them, which is impossible below +27.3%.
 
 - **Extend history to 2018.** The single highest-value task. `data/cache`
   starts Jan-2025, giving 13 monthly observations — far too few. NSE

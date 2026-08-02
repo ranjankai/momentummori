@@ -7,11 +7,14 @@ next 09:15 open):
 
     python run_strategy.py basket --expiry 2026-07-28
 
-Backtest a range of months:
+The backtest was REMOVED from this CLI on 02-Aug-2026. It is in
+legacy/backtest_cmd.py, unreachable from anything scheduled.
 
-    python run_strategy.py backtest --start 2025-04 --end 2026-04
-
-Both read cached bhavcopy from data/cache/ and fetch anything missing.
+Reason: it was the only caller that ran the strategy down a second code
+path -- mechanical redeployment instead of the live LLM pick -- and a
+second path is a second place for a bug to hide. Production now has one
+path and one path only. The historical numbers it produced are recorded
+in CONTEXT.md and do not need regenerating.
 """
 
 import argparse
@@ -133,62 +136,6 @@ def cmd_basket(args):
                    "carry_forward": config.V4_CARRY_FORWARD,
                    "basket": json.loads(basket.to_json(orient="records"))}, fh, indent=2)
     print(f"\nSaved -> {out}")
-
-
-def cmd_backtest(args):
-    symbols = strategy.load_fo_universe()
-    sectors = strategy.load_sector_map()
-    trading_days = strategy.known_trading_days()
-    start = datetime.strptime(args.start, "%Y-%m").date()
-    end = datetime.strptime(args.end, "%Y-%m").date()
-
-    months, y, m = [], start.year, start.month
-    while (y, m) <= (end.year, end.month):
-        months.append((y, m))
-        y, m = (y + 1, 1) if m == 12 else (y, m + 1)
-
-    results, total = [], 0.0
-    carry = {}
-    for (yy, mm) in months:
-        try:
-            py, pm = (yy - 1, 12) if mm == 1 else (yy, mm - 1)
-            prev_exp = strategy.expiry_for(py, pm, trading_days=trading_days)
-            this_exp = strategy.expiry_for(yy, mm, trading_days=trading_days)
-            basket, full, hist = _snapshot(prev_exp, symbols, sectors)
-
-            fwd = strategy.load_price_history(this_exp, symbols, days=60)
-            merged = dict(hist); merged.update(fwd)
-            days = [d for d in sorted(merged) if prev_exp < d <= this_exp]
-            if len(days) < 5:
-                raise strategy.StrategyError("not enough trading days in window")
-
-            res = strategy.simulate_month(
-                list(full.index), merged, days, sectors,
-                carry_in=carry, basket_symbols=basket["symbol"].tolist(),
-                carry_forward=not args.no_carry_forward)
-            total += res.return_pct
-            results.append(res)
-            carry = res.carry
-            print(f"{yy}-{mm:02d}  {res.return_pct:>7.2f}%   {res.trades:>3} trades"
-                  f"   carrying {len(carry)}")
-        except (strategy.StrategyError, nse_client.NseFetchError) as exc:
-            print(f"{yy}-{mm:02d}  SKIPPED ({exc})")
-
-    if carry:
-        print(f"\n{len(carry)} position(s) still open at the end of the range "
-              f"(marked to last close, not sold): {', '.join(sorted(carry))}")
-
-    if results:
-        rets = pd.Series([r.return_pct for r in results])
-        print(f"\nACCRUED (sum of {len(results)} months): {total:+.2f}%")
-        print(f"mean {rets.mean():.2f}%/mo | sd {rets.std():.2f} | "
-              f"worst {rets.min():.2f}% | positive {int((rets > 0).sum())}/{len(rets)}")
-        out = os.path.join(config.DATA_DIR, "v4_backtest.json")
-        with open(out, "w") as fh:
-            json.dump([{"month": r.month, "return_pct": r.return_pct,
-                        "trades": r.trades, "slots": r.slots} for r in results],
-                      fh, indent=2)
-        print(f"Saved -> {out}")
 
 
 def resolve_expiry(day: date) -> date:
@@ -441,14 +388,6 @@ def main():
     b.add_argument("--expiry", required=True, help="YYYY-MM-DD (the expiry date)")
     b.set_defaults(func=cmd_basket)
 
-    t = sub.add_parser("backtest", help="backtest a range of months")
-    t.add_argument("--start", required=True, help="YYYY-MM")
-    t.add_argument("--end", required=True, help="YYYY-MM")
-    t.add_argument("--no-carry-forward", action="store_true",
-                   help="disable v5 cross-month holding; force-sell every "
-                        "month end and start each month from empty slots "
-                        "(pre-v5 behaviour, for comparison)")
-    t.set_defaults(func=cmd_backtest)
 
     args = p.parse_args()
     _setup_logging(args.verbose)

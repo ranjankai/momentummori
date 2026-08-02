@@ -25,7 +25,7 @@ import json
 import logging
 import os
 import time
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 import requests
 
@@ -141,6 +141,41 @@ def fetch_corporate_actions(symbol: str, as_of: date,
 # ---------------------------------------------------------------------------
 # ASM surveillance
 # ---------------------------------------------------------------------------
+
+def fetch_trading_holidays(session: requests.Session = None) -> set:
+    """
+    FORWARD-LOOKING exchange holidays for the F&O segment, as a set of
+    dates.
+
+    This exists because `strategy.known_trading_days()` is inferred from
+    cached bhavcopy filenames, which only cover days that have already
+    happened. A FUTURE expiry can therefore never be holiday-checked
+    against it. That is not academic: the last Tuesday of Nov-2026 is
+    24-Nov, which IS an F&O holiday, so the real expiry is Mon 23-Nov.
+    Without this feed the expiry-evening job would look for the 24th,
+    find nothing, and skip the month entirely.
+
+    Returns an empty set on failure -- the caller then falls back to the
+    raw last-Tuesday, which is right ~11 months in 12.
+    """
+    data = _get_json("https://www.nseindia.com/api/holiday-master?type=trading",
+                     session)
+    if not isinstance(data, dict):
+        raise CorpFetchError(f"Unexpected holiday payload: {type(data).__name__}")
+
+    rows = data.get("FO") or data.get("CM") or []
+    out = set()
+    for row in rows:
+        raw = (row.get("tradingDate") or "").strip()
+        if not raw:
+            continue
+        try:
+            out.add(datetime.strptime(raw, "%d-%b-%Y").date())
+        except ValueError:
+            logger.warning("Unparseable holiday date %r", raw)
+    logger.info("Fetched %d F&O trading holidays", len(out))
+    return out
+
 
 def fetch_asm_symbols(session: requests.Session = None) -> dict:
     """

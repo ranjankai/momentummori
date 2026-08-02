@@ -19,7 +19,7 @@ import json
 import logging
 import os
 import sys
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 import pandas as pd
 
@@ -282,11 +282,21 @@ def cmd_sheet(args):
         # resolve it. Seed the calendar with today (we only ever run this
         # on a trading evening) and fall back to the raw last-Tuesday if
         # it still cannot be placed.
-        cal = strategy.known_trading_days() | {today}
+        raw = strategy.expiry_for(today.year, today.month)
         try:
-            expiry = strategy.expiry_for(today.year, today.month, trading_days=cal)
-        except strategy.StrategyError:
-            expiry = strategy.expiry_for(today.year, today.month)
+            import nse_corporate
+            holidays = nse_corporate.fetch_trading_holidays()
+        except Exception as exc:
+            logging.getLogger("momentum_tracker").warning(
+                "Holiday feed unavailable (%s); using raw last-weekday %s", exc, raw)
+            holidays = set()
+        expiry = raw
+        guard = 0
+        while (expiry in holidays or expiry.weekday() >= 5) and guard < 10:
+            expiry -= timedelta(days=1)
+            guard += 1
+        if expiry != raw:
+            print(f"Expiry rolled back {raw} -> {expiry} (exchange holiday)")
         if expiry != today and not args.force:
             print(f"Today ({today}) is not the monthly expiry "
                   f"({expiry}) — nothing sent. Use --force to override.")

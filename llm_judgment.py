@@ -89,7 +89,8 @@ EXIT_SCHEMA = {
 # ---------------------------------------------------------------------------
 
 def build_features(symbol: str, as_of: date, price_hist: dict,
-                   entry: float = None, signals: pd.DataFrame = None) -> dict:
+                   entry: float = None, signals: pd.DataFrame = None,
+                   universe_stats: dict = None) -> dict:
     """
     Compute the numeric payload for one stock.
 
@@ -123,57 +124,123 @@ def build_features(symbol: str, as_of: date, price_hist: dict,
         return {}
 
     s = pd.Series(closes)
+    h = pd.Series(highs)
+    l = pd.Series(lows)
     last = closes[-1]
     entry = float(entry or last)
+    n = len(closes)
 
-    def dma(n):
-        return round(float(s.tail(n).mean()), 2) if len(s) >= n else None
+    def r2(v):
+        return round(float(v), 2) if v is not None and pd.notna(v) else None
+
+    def dma(k):
+        return r2(s.tail(k).mean()) if n >= k else None
 
     def pct_from(v):
-        return round((last / v - 1) * 100, 2) if v else None
+        return r2((last / v - 1) * 100) if v else None
 
-    # True range -> ATR14
-    tr = []
-    for i in range(1, len(closes)):
-        tr.append(max(highs[i] - lows[i],
-                      abs(highs[i] - closes[i - 1]),
-                      abs(lows[i] - closes[i - 1])))
-    atr = round(float(np.mean(tr[-14:])), 2) if len(tr) >= 14 else None
+    def ret(k):
+        return r2((last / closes[-(k + 1)] - 1) * 100) if n > k else None
 
-    rets = s.pct_change().dropna()
+    def vol(k):
+        rr = s.pct_change().dropna().tail(k)
+        return r2(rr.std() * np.sqrt(252) * 100) if len(rr) > 5 else None
+
+    def dd(k):
+        w = s.tail(k)
+        return r2((w / w.cummax() - 1).min() * 100) if len(w) > 5 else None
+
+    def hh(k):
+        return r2(h.tail(k).max()) if n >= k else None
+
+    def ll(k):
+        return r2(l.tail(k).min()) if n >= k else None
+
+    # True range -> ATR
+    tr = [max(highs[i] - lows[i], abs(highs[i] - closes[i - 1]),
+              abs(lows[i] - closes[i - 1])) for i in range(1, n)]
+    atr14 = r2(np.mean(tr[-14:])) if len(tr) >= 14 else None
+    atr63 = r2(np.mean(tr[-63:])) if len(tr) >= 63 else None
+
+    d20, d50, d200 = dma(20), dma(50), dma(200)
+    hi52, lo52 = hh(252), ll(252)
+    daily = s.pct_change().dropna()
+
     feat = {
-        "last_close": round(last, 2),
-        "entry_price": round(entry, 2),
-        "pct_from_entry": round((last / entry - 1) * 100, 2),
-        "dma20": dma(20), "dma50": dma(50), "dma200": dma(200),
-        "pct_above_dma20": pct_from(dma(20)),
-        "pct_above_dma50": pct_from(dma(50)),
-        "pct_above_dma200": pct_from(dma(200)),
-        "donchian_high_20": round(max(highs[-20:]), 2),
-        "donchian_high_55": round(max(highs[-55:]), 2) if len(highs) >= 55 else None,
-        "donchian_low_20": round(min(lows[-20:]), 2),
-        "pct_to_donchian_high_20": round((max(highs[-20:]) / last - 1) * 100, 2),
-        "pct_to_donchian_high_55": (round((max(highs[-55:]) / last - 1) * 100, 2)
-                                    if len(highs) >= 55 else None),
-        "atr14": atr,
-        "atr_pct_of_price": round(atr / last * 100, 2) if atr else None,
-        "realised_vol_63d_annualised_pct": round(
-            float(rets.tail(63).std() * np.sqrt(252) * 100), 2),
-        "return_21d_pct": round((last / closes[-22] - 1) * 100, 2) if len(closes) > 22 else None,
-        "return_63d_pct": round((last / closes[-64] - 1) * 100, 2) if len(closes) > 64 else None,
-        "max_drawdown_63d_pct": round(
-            float((s.tail(63) / s.tail(63).cummax() - 1).min() * 100), 2),
-    }
-    if len(vols) >= 20 and not all(pd.isna(vols[-20:])):
-        v20 = pd.Series(vols[-20:]).dropna()
-        v60 = pd.Series(vols[-60:]).dropna()
-        if len(v20) and len(v60):
-            feat["volume_20d_vs_60d_ratio"] = round(float(v20.mean() / v60.mean()), 2)
+        # --- price and reference levels -------------------------------
+        "last_close": r2(last),
+        "reference_entry_price": r2(entry),
+        "prev_close": r2(closes[-2]) if n > 1 else None,
+        "day_range_pct": r2((highs[-1] - lows[-1]) / closes[-1] * 100),
 
+        # --- trend: moving averages -----------------------------------
+        "dma10": dma(10), "dma20": d20, "dma50": d50,
+        "dma100": dma(100), "dma200": d200,
+        "pct_above_dma10": pct_from(dma(10)),
+        "pct_above_dma20": pct_from(d20),
+        "pct_above_dma50": pct_from(d50),
+        "pct_above_dma100": pct_from(dma(100)),
+        "pct_above_dma200": pct_from(d200),
+        "ma_stack_bullish": (bool(d20 and d50 and d200 and d20 > d50 > d200)
+                             if (d20 and d50 and d200) else None),
+        "dma50_slope_21d_pct": (r2((s.tail(50).mean() / s.iloc[-71:-21].mean() - 1) * 100)
+                                if n >= 71 else None),
+
+        # --- structure: swing highs / lows -----------------------------
+        "donchian_high_20": hh(20), "donchian_high_55": hh(55),
+        "donchian_high_100": hh(100),
+        "donchian_low_20": ll(20), "donchian_low_55": ll(55),
+        "high_52w": hi52, "low_52w": lo52,
+        "pct_to_donchian_high_20": r2((hh(20) / last - 1) * 100) if hh(20) else None,
+        "pct_to_donchian_high_55": r2((hh(55) / last - 1) * 100) if hh(55) else None,
+        "pct_to_high_52w": r2((hi52 / last - 1) * 100) if hi52 else None,
+        "pct_above_low_52w": r2((last / lo52 - 1) * 100) if lo52 else None,
+        "pct_above_donchian_low_20": r2((last / ll(20) - 1) * 100) if ll(20) else None,
+
+        # --- momentum over several horizons ----------------------------
+        "return_5d_pct": ret(5), "return_21d_pct": ret(21),
+        "return_63d_pct": ret(63), "return_126d_pct": ret(126),
+        "return_252d_pct": ret(252),
+        "up_days_pct_last_21": r2((daily.tail(21) > 0).mean() * 100),
+        "up_days_pct_last_63": r2((daily.tail(63) > 0).mean() * 100),
+        "best_day_last_63_pct": r2(daily.tail(63).max() * 100),
+        "worst_day_last_63_pct": r2(daily.tail(63).min() * 100),
+
+        # --- volatility and risk ---------------------------------------
+        "atr14": atr14, "atr63": atr63,
+        "atr_pct_of_price": r2(atr14 / last * 100) if atr14 else None,
+        "realised_vol_21d_annualised_pct": vol(21),
+        "realised_vol_63d_annualised_pct": vol(63),
+        "realised_vol_252d_annualised_pct": vol(252),
+        "vol_21d_vs_63d_ratio": (r2(vol(21) / vol(63))
+                                 if vol(21) and vol(63) else None),
+        "max_drawdown_63d_pct": dd(63),
+        "max_drawdown_252d_pct": dd(252),
+        "drawdown_from_52w_high_pct": r2((last / hi52 - 1) * 100) if hi52 else None,
+    }
+    if entry and entry > 0:
+        feat["pct_from_entry"] = r2((last / entry - 1) * 100)
+
+    # --- participation ------------------------------------------------
+    vser = pd.Series(vols).dropna()
+    if len(vser) >= 60:
+        feat["volume_20d_vs_60d_ratio"] = r2(vser.tail(20).mean() / vser.tail(60).mean())
+        feat["volume_today_vs_20d_ratio"] = r2(vols[-1] / vser.tail(20).mean()) \
+            if pd.notna(vols[-1]) else None
+        up = [v for v, c in zip(vols[-21:], daily.tail(21)) if pd.notna(v) and c > 0]
+        dn = [v for v, c in zip(vols[-21:], daily.tail(21)) if pd.notna(v) and c <= 0]
+        if up and dn:
+            feat["up_down_volume_ratio_21d"] = r2(np.mean(up) / np.mean(dn))
+
+    # --- derivatives: ONLY meaningful on expiry day --------------------
     if signals is not None and symbol in signals.index:
         for col in ("rollover", "cost_of_carry"):
             if col in signals.columns and pd.notna(signals.at[symbol, col]):
-                feat[col] = round(float(signals.at[symbol, col]), 2)
+                feat[col] = r2(signals.at[symbol, col])
+
+    # --- universe context ----------------------------------------------
+    if universe_stats:
+        feat.update(universe_stats)
     return feat
 
 
@@ -182,45 +249,75 @@ def build_features(symbol: str, as_of: date, price_hist: dict,
 # ---------------------------------------------------------------------------
 
 _TARGET_PROMPT = """\
-You are setting a profit target for one Indian equity position that was
-just entered. You will be given ONLY the numbers below, all computed from
-exchange data today. You have no chart and no other knowledge of this
-stock. Do not use any recollection of the company; if a level is not in
-the numbers, you do not know it.
+You are an equity analyst setting a profit-booking level for one Indian
+stock, on the evening of the monthly F&O expiry. The position will be
+bought at tomorrow's open and held for roughly 21 trading sessions, until
+the next expiry.
 
-POSITION
-  entry price: {entry}
+ONE QUESTION: how high can this stock plausibly trade at some point in
+those 21 sessions?
 
-COMPUTED READINGS
+Not where it will close. Not where it will end up. The highest level it
+could realistically TOUCH, because the exit is a resting limit order that
+fills the moment price reaches it, even if the stock falls back the same
+day.
+
+Every number below was computed from exchange data at today's close. You
+have no chart. You have no knowledge of this company, its news, its
+results or its sector. If a level is not in these numbers, you do not
+know it. Do not recall anything about this stock.
+
+READINGS
 {features}
 
-TASK
-Choose ONE profit target, expressed as a percentage above the entry
-price, by weighing these readings against each other. Think like a
-technical analyst blending several signals into a single level:
+HOW AN ANALYST WOULD READ THIS
+Work through it properly rather than applying one rule:
 
-  - Prior swing highs (Donchian) are natural resistance and a common
-    place to book profit.
-  - ATR tells you how far this stock actually travels. A target many
-    ATRs away is unlikely to be reached inside a month.
-  - Distance above the moving averages tells you how extended it already
-    is. Something far above its 200-day has less room than something
-    just breaking out.
-  - High realised volatility supports a wider target; low volatility
-    argues for a tighter one.
-  - A deep recent drawdown argues for caution.
+  Reach. ATR is how far this stock actually travels in a day. Over 21
+  sessions a trending stock covers several ATRs, a churning one covers
+  almost none net. Realised volatility says the same thing annualised.
+  Compare the 21-day volatility against the 63-day: expanding volatility
+  supports a wider level, contracting argues for a tighter one.
+
+  Resistance. Prior swing highs, the 52-week high, and the upper Donchian
+  levels are where sellers previously appeared. A stock 2% below its
+  55-day high faces a test there; one already at new highs has open air
+  above it and only ATR to constrain it.
+
+  Extension. Distance above the 20, 50, 100 and 200-day averages says how
+  stretched it already is. Far above all of them means much of the move
+  is behind it. Just reclaiming the 50 with the stack turning up means
+  more room. Look at whether the stack is properly ordered and whether
+  the 50-day is actually rising.
+
+  Quality of the move. Percentage of up days, up/down volume ratio, and
+  best/worst single days separate steady accumulation from one violent
+  gap that has already happened. Volume expanding into the move supports
+  a higher level; a move on fading volume does not.
+
+  Damage. Recent drawdown and distance below the 52-week high matter.
+  A stock 35% off its high in a 63-day drawdown is repairing, not
+  advancing, and will struggle to travel far in a month.
+
+  Context. Where this stock's volatility and returns sit against the
+  universe medians tells you whether these readings are remarkable or
+  ordinary for this basket.
+
+Weigh these against each other. They will conflict — say which you gave
+weight to and why.
 
 HARD LIMITS
-  - Minimum {min_pct}%. Below this a target is not worth placing.
-  - Maximum {max_pct}%. This is a hard ceiling, not a guideline. Never
-    propose more, however strong the setup looks.
-  - The holding period is roughly one month. Set something reachable in
-    that window, not an eventual price.
+  - Express the answer as a percentage above the entry price.
+  - Minimum {min_pct}%. Below that a target is not worth placing.
+  - Maximum {max_pct}%. A hard ceiling. Never exceed it, however strong
+    the setup looks.
+  - It must be reachable within about 21 sessions. A level the stock
+    would need six months to see is a wrong answer, not a cautious one.
 
-`target_basis` must name the readings you weighed and say why, in one or
-two sentences. `inputs_used` must list the exact field names from the
-COMPUTED READINGS block that you relied on -- do not list fields you did
-not use, and do not name a field that was not given to you.
+`target_basis` must explain your reasoning in two or three sentences,
+naming the readings that drove it and the ones you discounted.
+`inputs_used` must list the exact field names from READINGS that you
+relied on. Never name a field that was not given to you.
 """
 
 

@@ -564,12 +564,72 @@ Safer than the old framing, but not established.
 - `tools_features.py <expiry>` builds the seven-sheet feature workbook
   for any expiry, resolving the three prior expiries itself.
 
+## VERIFIED 13-MONTH BACKTEST -- final configuration (02-Aug-2026)
+
+Run through `strategy.simulate_month` (the SAME function daily_report
+calls), via `tools_run13.py`. Carry-forward ON, redeployment OFF,
+regime-pegged stop, 40% target.
+
+| cycle | breadth | stop | return | trades | carried |
+|---|---|---|---|---|---|
+| 2025-03 | 27.3% | 10% | +6.01% | 4 | 6 |
+| 2025-04 | 45.5% | 5% | -0.08% | 9 | 1 |
+| 2025-05 | 54.0% | 5% | +0.60% | 5 | 5 |
+| 2025-06 | 63.3% | 5% | -3.42% | 10 | 0 |
+| 2025-07 | 56.8% | 5% | -3.98% | 8 | 2 |
+| 2025-08 | 50.0% | 5% | +3.95% | 3 | 7 |
+| 2025-09 | 55.4% | 5% | +3.41% | 3 | 7 |
+| 2025-10 | 71.2% | 5% | +0.81% | 7 | 3 |
+| 2025-11 | 59.0% | 5% | +2.81% | 6 | 4 |
+| 2025-12 | 55.1% | 5% | -2.26% | 9 | 1 |
+| 2026-01 | 40.0% | 10% | +14.23% | 1 | 9 |
+| 2026-02 | 48.1% | 5% | -2.22% | 9 | 1 |
+| 2026-03 | 19.4% | 10% | +19.47% | 2 | 8 |
+
+```
+ACCRUED (sum)      +39.34%      vs +31.77% for the old config
+COMPOUNDED Rs100    143.60
+worst month         -3.98%      vs -8.01% -- HALVED
+max drawdown        -7.27%
+positive months        8/13
+mean 3.03%/mo | sd 6.91 | t-stat 1.58   (was ~1.30)
+F&O universe median over the same window: +8.66%
+```
+
+The regime stop is worth ~7.6pp. Carry-forward on/off is ~0.7pp -- noise
+at this sample size; it helps in down months (Dec +1.02, Feb +1.15) and
+hurts in up months (Oct -1.56) because a carried position is re-marked to
+the month-end close and its stop re-derived off that higher basis.
+
+The wide stop fired in only 3 of 13 cycles (Mar-25, Jan-26, Mar-26) and
+was right in all three. Note the trades column: wide-stop months run 1-4
+trades, tight-stop months 7-10. The mechanism is not "wider stop earns
+more" -- it is "wider stop stops you being shaken out, so carry-forward
+has something left to carry."
+
+### METHOD WARNING -- read before trusting any afternoon number
+
+Several comparisons run on 02-Aug-2026 used an ad-hoc `sim()` helper that
+reimplemented the monthly loop and **silently dropped carry-forward and
+chaining**. Anything quoting "live V4 = Rs115.90" came from that helper,
+not from the real engine. The RELATIVE rankings in those tests are
+probably still valid (both arms shared the construction) but the LEVELS
+are not comparable to the table above. `tools_run13.py` is the only
+13-month result produced by the production code path -- use it.
+
 ## Pending Tasks
 
 - ~~Revert the losing config~~ DONE 02-Aug-2026.
 - ~~Regime-pegged stop~~ DONE 02-Aug-2026 (breadth, 45% threshold).
-- **Validate the regime stop on the other 8 cycles.** It was fitted on 5.
-  Apr-2025..Nov-2025 are untouched and the bhavcopy is cached.
+- ~~Validate the regime stop on the other 8 cycles~~ DONE. All 13 run
+  through the real engine: +39.34% accrued, worst month -3.98%, t 1.58.
+  Mar-2025 is the strongest out-of-sample point: breadth 27.3% called the
+  wide stop and returned +6.01% against -3.16% for the tight stop.
+- **Re-run the four rejected hypotheses through the real engine.** The
+  LLM targets, Gaussian volatility centring, price-momentum selection and
+  sector-first were all rejected using the flawed `sim()` helper. The
+  rankings are probably right but none was measured against the true
+  baseline.
 - **Test limit-order entry.** Place buys ~2% below the expiry close
   instead of at the next open, and measure fill rate and return over the
   five cycles. This is the one mechanism with direct evidence behind it

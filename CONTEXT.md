@@ -399,21 +399,184 @@ prevent it.
   target_for / exit_judgement / choose_candidate (all three UNPROVEN and
   measured NEGATIVE above).
 
+## LIVE CONFIGURATION as of 02-Aug-2026 (end of session)
+
+```
+REGIME_STOP_ENABLED      True    breadth >=45% -> 5% stop, <45% -> 10%
+V4_TARGET_PCT            40.0    unchanged
+V4_REDEPLOY_ENABLED      False   freed slots hold cash to expiry
+V4_CARRY_FORWARD         True
+LLM_TARGET_ENABLED       False
+LLM_EXIT_ENABLED         False
+LLM_CANDIDATE_ENABLED    False
+CORP_ACTION_LLM_ENABLED  True    the only LLM call kept
+VETO_ENABLED             True
+```
+
+Turning the LLM flags off is sufficient -- with them False, `llm_judgment`
+is never imported, `choose_candidate` is never called and
+`next_candidate` returns None immediately. The modules are retained
+deliberately: they hold four prompts and a 20/20 validation set, and
+deleting them would mean unpicking the simulator refactor that removed
+the duplicate engine.
+
+## REGIME-PEGGED STOP -- the one change adopted
+
+The stop is chosen ONCE, on the expiry close, from market breadth:
+the percentage of the F&O universe trading above its own 200-day average.
+
+| cycle | breadth | 5% stop | 10% stop | better |
+|---|---|---|---|---|
+| 2025-12 | 55.1% | -3.28% | -4.88% | 5% |
+| 2026-01 | 40.0% | +13.77% | +14.20% | 10% |
+| 2026-02 | 48.1% | -3.37% | **-12.66%** | 5% |
+| 2026-03 | 19.4% | +10.03% | **+19.17%** | 10% |
+| 2026-04 | 49.0% | -0.93% | -1.49% | 5% |
+
+Breadth separated the better stop **5/5** at a 45% threshold. Median
+universe volatility separated **0/5** -- the intuitive version of this
+idea does not work. Compounded: always-5% 115.90, always-10% 113.99,
+breadth-pegged **126.28**.
+
+Logic: a beaten-down market (low breadth) is one you are buying the
+bounce in, so a wide stop avoids being shaken out; a healthy-looking
+market's risk is a sudden crash, so cut fast. Feb-2026 is the case --
+breadth 48%, median 20-day return POSITIVE going in, then -12.5%.
+
+**FIVE OBSERVATIONS, threshold chosen after seeing the outcomes.** A
+coin-flip rule separates 5 points about 1 time in 10. This is a
+hypothesis under live test. `REGIME_STOP_ENABLED = False` reverts.
+
+Live breadth on the 28-Jul-2026 expiry: 50.0% -> 5% stop.
+
+## Reverse-engineering the comparison portfolio (02-Aug-2026)
+
+A manually-run monthly basket ("top 10 scrips monthly.xlsx", sheets
+DEC 2025 / FEB 2026 / MAR 2026) returned +6.40, +6.81, +0.03, +9.23,
++6.29 across five cycles -- positive in all five, including the month the
+F&O median fell 12.5%. Compounded Rs100 -> 131.98 against our 115.90.
+
+### Their selection model, inferred (17/28 reproduced, 12.6x lift)
+
+```
+FILTERS   Close > 20 DMA,  Close > 50 DMA,  Cash Volume Rank <= 150
+SCORE     Trend Composite = 0.5*(60D rank) + 0.3*(20D rank) + 0.2*(5D rank)
+BUILD     max 2 per sector, take 10
+```
+Trend Composite AUC **0.927**; selected median rank 24 vs 107. Both-DMA
+alone keeps 89% of their picks in 29% of the universe.
+
+### What the analysis RULED OUT -- all of it measured, none of it guessed
+
+- **Derivatives contribute nothing to their selection.** OI Rank AUC
+  0.500 p=0.995. Roll Surprise 0.524 p=0.70. Roll Z 0.553 p=0.57.
+  Current Roll 0.428 p=0.21. Delivery % 0.456 p=0.46. The
+  rollover-surprise hypothesis is not weak, it is ABSENT.
+- **Volatility / trend quality is not the missing signal.** Only ATR20
+  Rank was significant (d=-1.06, p=0.026) and adding it moved 17->19
+  only at exactly 0.25 weight, collapsing to 13 at 0.5 and 11 at 1.0.
+  Trend R-squared went the WRONG way -- their picks have LOWER trend
+  quality than our false positives.
+- **Size / index membership is not it either.** SizeTier AUC 0.487
+  p=0.744. N100 membership AUC 0.482 p=0.715, and as a filter it HALVES
+  the hit rate (15 -> 9). They are not running a large-cap universe.
+- **Nothing beat noise.** Calibrated against 200 random features at the
+  same weight: P(noise >= +2) = 1.5%. The three best real candidates all
+  scored exactly +2 -- including OI Rank, which has AUC 0.500 by
+  construction. With 18 candidates tested, that is chance.
+
+### THE ACTUAL DIFFERENCE: entry price, not selection
+
+Their sheet quotes an `Entry level` per stock. Against the market:
+
+```
+entry vs selection-day CLOSE   median -1.15%   below close 23/29
+entry vs NEXT-DAY OPEN         median -2.10%   below open  27/29
+```
+
+**27 of 29 entries are below the next day's open.** They place limit
+orders under the market and fill on dips -- NATIONALUM at 358 against a
+396 open (-9.7%), ONGC 268.50 vs 290 (-7.4%), DMART 3730 vs 4075 (-8.5%).
+We buy all ten at the open. Their exits are also modest and reachable:
+target median **+9.7%**, stop median **-4.7%**.
+
+Caveat: their sheets show only the ten that FILLED. Names selected whose
+limit never filled are invisible, so their published returns are
+conditional on fills and flatter the strategy by an unknown amount.
+
+### Copying their selection does NOT reproduce their returns
+
+```
+Rs100, five cycles
+  trend selection + our exits      102.13
+  trend selection + THEIR exits     99.04
+  our live V4                      115.90
+  THEM                             131.98
+```
+We reproduce ~60% of their picks and earn Rs102. Selection is not where
+their edge is.
+
+## Four selection hypotheses tested against RETURNS -- all failed
+
+| change | Rs100 over 5 cycles |
+|---|---|
+| LLM per-stock targets | 104.49 |
+| volatility centring (Gaussian at universe median) | 103.75 |
+| price-momentum selection | 102.13 |
+| sector-first selection (best of 5 variants) | 107.85 |
+| **live V4 (unchanged)** | **115.90** |
+
+Notes: the Gaussian reproduced their volatility profile almost exactly
+(25.9 vs 28.2, 33.3 vs 32.9) and still shared only 2 of 49 picks --
+matching a summary statistic says nothing about selection. Sector-first
+got WORSE the more it concentrated (3 sectors 98.65, 10 sectors 107.85),
+so its only benefit was diversification, not sector choice.
+
+## Why the LLM target layer failed, precisely
+
+The prompt asked for a level "reachable in 21 sessions" and filled the
+context with caution language -- resistance, extension, drawdown. Every
+instruction pushed the answer DOWN, and nothing said that setting it too
+low permanently forfeits the upside. Mar-Apr 2026: eight positions booked
+at 10-14% while the same names finished at +12.9, +12.7, +11.3, +19.3,
++30.0, +50.5, +50.6. **7 of 8 kept running; 1 fell back.**
+
+The flat 40% is not a profit-booking rule, it is a TAIL-RISK CAP. Firing
+twice in thirteen months is the design working. A tight target is
+incompatible with a high-volatility selection: you can have one or the
+other.
+
+A reframed prompt ("predict the PEAK over the next N days", drop if
+<1%, cap at 40%) was tested on the clean Apr-May cycle: -0.42% vs -0.93%
+for flat 40%. The +0.51pp came from ONE fill. Predictions were too high
+in 9 of 10 cases (median predicted 12.5%, median actual peak 4.1%).
+Safer than the old framing, but not established.
+
+## New data sources wired 02-Aug-2026
+
+- `nse_client.fetch_delivery_data(date)` -- NSE `sec_bhavdata_full`
+  (DDMMYYYY, plain CSV). Adds DELIV_QTY, DELIV_PER, NO_OF_TRADES,
+  AVG_PRICE. Same cache/retry/.nodata semantics.
+- F&O volume columns were ALREADY mapped in `scoring.normalize_fo_columns`
+  (`volume`, `turnover`, `change_in_oi`) and simply unused.
+- NIFTY 50/100/200/500 constituent lists fetch fine from
+  `nsearchives.nseindia.com/content/indices/ind_niftyNNNlist.csv`.
+- `tools_features.py <expiry>` builds the seven-sheet feature workbook
+  for any expiry, resolving the three prior expiries itself.
+
 ## Pending Tasks
 
-- **REVERT V4_TARGET_PCT to 40 and V4_STOP_LOSS_PCT to 5**, and set
-  LLM_TARGET_ENABLED / LLM_EXIT_ENABLED / LLM_CANDIDATE_ENABLED to False.
-  As of 02-Aug-2026 they are 40->set-to-40? NO: config currently holds
-  V4_STOP_LOSS_PCT = 10.0 and all three LLM flags True. The five-cycle
-  test says that configuration is 13pp worse. NOT YET REVERTED.
-- **REGIME-PEGGED STOP -- the next piece of work.** Choose 5% or 10% on
-  expiry day, before entry, from data available then. Candidate signals,
-  none yet implemented: NIFTY vs its own 200-day; universe median 63d
-  volatility (27.5 into Feb, 33.6 into Apr -- already computed in
-  rank_universe); breadth, % of the 208 above their 200-day; India VIX
-  on the expiry close. Test each against all 13 cycles and ask whether
-  any would have called February. This is worth more than everything
-  else on this list.
+- ~~Revert the losing config~~ DONE 02-Aug-2026.
+- ~~Regime-pegged stop~~ DONE 02-Aug-2026 (breadth, 45% threshold).
+- **Validate the regime stop on the other 8 cycles.** It was fitted on 5.
+  Apr-2025..Nov-2025 are untouched and the bhavcopy is cached.
+- **Test limit-order entry.** Place buys ~2% below the expiry close
+  instead of at the next open, and measure fill rate and return over the
+  five cycles. This is the one mechanism with direct evidence behind it
+  (27/29 of the comparison portfolio's entries were below the next open)
+  and it has NOT been tested on our basket.
+- **Rotate the Gemini API key** -- pasted into a chat transcript
+  01-Aug-2026, still live.
 - **Model the +/-10% price band in the backtest.** Targets currently fill
   on any day whose high touches them, which is impossible below +27.3%.
 

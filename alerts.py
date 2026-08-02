@@ -33,6 +33,18 @@ import config
 logger = logging.getLogger("momentum_tracker.alerts")
 
 
+def recipients() -> list:
+    """
+    Chat IDs to deliver to.
+
+    TELEGRAM_CHAT_ID accepts a comma-separated list, so the same note can
+    go to a personal DM and a group at once. Group IDs are NEGATIVE
+    (e.g. -5561496881); that is normal, not a typo.
+    """
+    raw = str(config.TELEGRAM_CHAT_ID or "")
+    return [c.strip() for c in raw.split(",") if c.strip()]
+
+
 def _configured() -> tuple:
     """(ok, reason). Never raises."""
     if not config.ALERTS_ENABLED:
@@ -41,7 +53,7 @@ def _configured() -> tuple:
         return False, f"unsupported ALERT_CHANNEL {config.ALERT_CHANNEL!r}"
     if not config.TELEGRAM_BOT_TOKEN:
         return False, "TELEGRAM_BOT_TOKEN is not set (check .env)"
-    if not config.TELEGRAM_CHAT_ID:
+    if not recipients():
         return False, "TELEGRAM_CHAT_ID is not set (check .env)"
     return True, ""
 
@@ -81,48 +93,54 @@ def send(text: str) -> bool:
     url = config.TELEGRAM_API_URL.format(
         token=config.TELEGRAM_BOT_TOKEN, method="sendMessage")
     parts = _chunks(text, config.ALERT_MAX_CHARS)
+    chats = recipients()
     all_ok = True
 
-    for idx, part in enumerate(parts, 1):
-        delivered = False
-        for attempt in range(1, config.MAX_RETRIES + 1):
-            try:
-                resp = requests.post(
-                    url,
-                    json={
-                        "chat_id": config.TELEGRAM_CHAT_ID,
-                        "text": part,
-                        "parse_mode": config.TELEGRAM_PARSE_MODE,
-                        "disable_web_page_preview": True,
-                    },
-                    timeout=config.REQUEST_TIMEOUT_SECONDS,
-                )
-            except requests.RequestException as exc:
-                logger.warning("Alert chunk %d/%d attempt %d/%d: transport "
-                               "error: %s", idx, len(parts), attempt,
-                               config.MAX_RETRIES, exc)
-            else:
-                if resp.status_code == 200:
-                    logger.info("Alert chunk %d/%d delivered (%d chars)",
-                                idx, len(parts), len(part))
-                    delivered = True
-                    break
-                # 400 usually means malformed HTML in the payload. Retrying
-                # will not fix it, so fail this chunk fast and keep going.
-                if resp.status_code == 400:
-                    logger.error("Alert chunk %d/%d rejected (400): %s",
-                                 idx, len(parts), resp.text[:200])
-                    break
-                logger.warning("Alert chunk %d/%d attempt %d/%d: HTTP %d: %s",
-                               idx, len(parts), attempt, config.MAX_RETRIES,
-                               resp.status_code, resp.text[:160])
-            if attempt < config.MAX_RETRIES:
-                time.sleep(config.RETRY_BACKOFF_BASE_SECONDS * (2 ** (attempt - 1)))
+    for chat_id in chats:
+        for idx, part in enumerate(parts, 1):
+            delivered = False
+            for attempt in range(1, config.MAX_RETRIES + 1):
+                try:
+                    resp = requests.post(
+                        url,
+                        json={
+                            "chat_id": chat_id,
+                            "text": part,
+                            "parse_mode": config.TELEGRAM_PARSE_MODE,
+                            "disable_web_page_preview": True,
+                        },
+                        timeout=config.REQUEST_TIMEOUT_SECONDS,
+                    )
+                except requests.RequestException as exc:
+                    logger.warning("chat %s chunk %d/%d attempt %d/%d: "
+                                   "transport error: %s", chat_id, idx,
+                                   len(parts), attempt, config.MAX_RETRIES, exc)
+                else:
+                    if resp.status_code == 200:
+                        logger.info("chat %s chunk %d/%d delivered (%d chars)",
+                                    chat_id, idx, len(parts), len(part))
+                        delivered = True
+                        break
+                    # 400 = malformed payload, 403 = bot removed or blocked.
+                    # Neither is fixed by retrying; fail this chat fast and
+                    # keep going so one bad recipient cannot stop the rest.
+                    if resp.status_code in (400, 403):
+                        logger.error("chat %s chunk %d/%d rejected (%d): %s",
+                                     chat_id, idx, len(parts),
+                                     resp.status_code, resp.text[:200])
+                        break
+                    logger.warning("chat %s chunk %d/%d attempt %d/%d: HTTP "
+                                   "%d: %s", chat_id, idx, len(parts), attempt,
+                                   config.MAX_RETRIES, resp.status_code,
+                                   resp.text[:160])
+                if attempt < config.MAX_RETRIES:
+                    time.sleep(config.RETRY_BACKOFF_BASE_SECONDS
+                               * (2 ** (attempt - 1)))
 
-        if not delivered:
-            logger.error("Alert chunk %d/%d FAILED after %d attempts",
-                         idx, len(parts), config.MAX_RETRIES)
-            all_ok = False
+            if not delivered:
+                logger.error("chat %s chunk %d/%d FAILED after %d attempts",
+                             chat_id, idx, len(parts), config.MAX_RETRIES)
+                all_ok = False
 
     return all_ok
 

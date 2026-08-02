@@ -147,6 +147,39 @@ def fetch_cm_bhavcopy(trade_date: date, use_cache: bool = True) -> pd.DataFrame:
         {"TckrSymb", "ClsPric", "TtlTradgVol"}, trade_date, use_cache)
 
 
+def fetch_delivery_data(trade_date: date, use_cache: bool = True) -> pd.DataFrame:
+    """
+    Security-wise full bhavdata: delivery quantity and percentage, trade
+    count and VWAP. None of these are in the UDiFF bhavcopy.
+
+    Plain CSV rather than a zip, and NSE pads the header and every field
+    with leading spaces, so columns are stripped on load. Same cache,
+    retry and .nodata semantics as the bhavcopy fetchers.
+    """
+    cache_file = _cache_path("dlv", trade_date)
+    if use_cache and os.path.exists(cache_file):
+        logger.info("Using cached delivery data for %s", trade_date)
+        return pd.read_csv(cache_file)
+    if use_cache and os.path.exists(_nodata_path("dlv", trade_date)):
+        raise NseNoDataError(
+            f"No delivery data for {trade_date} (cached no-data marker)")
+
+    url = config.NSE_SEC_BHAVDATA_URL.format(date=trade_date)
+    try:
+        content = _download_with_retry(url)
+    except NseNoDataError:
+        if use_cache:
+            _mark_nodata("dlv", trade_date)
+        raise
+    df = pd.read_csv(io.BytesIO(content))
+    df.columns = [c.strip() for c in df.columns]
+    for col in df.select_dtypes(include="object").columns:
+        df[col] = df[col].str.strip()
+    _validate_columns(df, {"SYMBOL", "SERIES", "DELIV_QTY", "DELIV_PER"}, url)
+    df.to_csv(cache_file, index=False)
+    return df
+
+
 def fetch_fo_bhavcopy(trade_date: date, use_cache: bool = True) -> pd.DataFrame:
     """Fetch NSE F&O bhavcopy (futures OI, settlement price, expiry) for one day."""
     return _fetch_bhavcopy(

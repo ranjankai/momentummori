@@ -43,6 +43,15 @@ NSE_CM_BHAVCOPY_URL = (
     "BhavCopy_NSE_CM_0_0_0_{date:%Y%m%d}_F_0000.csv.zip"
 )
 
+# Full security-wise data: adds DELIV_QTY, DELIV_PER, NO_OF_TRADES and
+# AVG_PRICE (VWAP), none of which are in the UDiFF bhavcopy above.
+# Plain CSV, not zipped. Date format is DDMMYYYY -- a %d%b%Y variant
+# exists in NSE's docs but 404s (verified 02-Aug-2026).
+NSE_SEC_BHAVDATA_URL = (
+    "https://nsearchives.nseindia.com/products/content/"
+    "sec_bhavdata_full_{date:%d%m%Y}.csv"
+)
+
 # NSE blocks requests without a browser-like User-Agent / referer.
 NSE_REQUEST_HEADERS = {
     "User-Agent": (
@@ -125,9 +134,41 @@ V4_HISTORY_DAYS = 260        # trading days of price history pulled per run
 # deliberately selects the most volatile names in the market cannot use a
 # stop inside their normal daily range.
 #
-# NOT BACKTESTED at 10%. The +31.77% in CONTEXT.md was produced at 5%.
-V4_STOP_LOSS_PCT = 10.0
+# REGIME-PEGGED STOP (02-Aug-2026).
+#
+# The stop is chosen ONCE, on expiry day, from breadth measured across
+# the F&O universe -- the % of names trading above their own 200-day
+# average. Measured over five cycles:
+#
+#   cycle    breadth   5% stop   10% stop   better
+#   2025-12    55.1%    -3.28%    -4.88%      5%
+#   2026-01    40.0%   +13.77%   +14.20%     10%
+#   2026-02    48.1%    -3.37%   -12.66%      5%
+#   2026-03    19.4%   +10.03%   +19.17%     10%
+#   2026-04    49.0%    -0.93%    -1.49%      5%
+#
+# Breadth separated 5/5 at a 45% threshold; median universe volatility
+# did NOT separate at all. The logic: a beaten-down market (low breadth)
+# is one you are buying the bounce in, so a wide stop avoids being shaken
+# out; a healthy-looking market's risk is a sudden crash, so cut fast.
+#
+# FIVE OBSERVATIONS, threshold chosen after seeing the outcomes. A
+# coin-flip rule separates 5 points about 1 time in 10. Treat as a
+# hypothesis under live test, not a finding. Set REGIME_STOP_ENABLED
+# False to revert to a fixed V4_STOP_LOSS_PCT.
+REGIME_STOP_ENABLED = True
+REGIME_BREADTH_THRESHOLD = 45.0    # % of universe above its 200 DMA
+REGIME_STOP_TIGHT_PCT = 5.0        # breadth >= threshold: healthy market
+REGIME_STOP_WIDE_PCT = 10.0        # breadth <  threshold: beaten down
+
+V4_STOP_LOSS_PCT = 5.0             # fallback when the regime stop is off
 V4_TARGET_PCT = 40.0
+
+# Mid-month redeployment. Measured across five cycles it was a wash and
+# marginally negative (Dec -4.88 vs -5.84, Jan +14.20 vs +13.03,
+# Feb -7.87 vs -7.30): the replacement is by then a weaker name than the
+# one it replaced. Disabled -- a freed slot now holds cash to expiry.
+V4_REDEPLOY_ENABLED = False
 
 # Redeployment: when a position exits mid-month its slot is refilled at the
 # NEXT session's open with the highest-ranked eligible name (sector cap
@@ -381,8 +422,8 @@ ACTUAL_FILLS_FILE = os.path.join(DATA_DIR, "actual_fills.json")
 # a chart and never asked to recall a level.
 # ---------------------------------------------------------------------------
 
-LLM_TARGET_ENABLED = True
-LLM_EXIT_ENABLED = True
+LLM_TARGET_ENABLED = False
+LLM_EXIT_ENABLED = False
 
 # HARD CEILING. The model may propose any target up to this and no
 # higher; anything above is clamped. V4_TARGET_PCT remains the fallback
@@ -423,7 +464,7 @@ LLM_JUDGMENT_FILE = os.path.join(DATA_DIR, "llm_targets.json")
 #
 # So mid-month candidate selection uses CASH DATA ONLY: price-based
 # relative strength, recomputed daily. Derivatives are not consulted.
-LLM_CANDIDATE_ENABLED = True
+LLM_CANDIDATE_ENABLED = False
 
 # Mechanical price-based RS, used to build the shortlist the LLM chooses
 # from AND as the fallback when the LLM is off or fails. Weights sum to 1.

@@ -153,10 +153,11 @@ def build(as_of: date, session=None) -> Report:
                 return None
             return llm_judgment.choose_candidate(ordered, _rs).get("symbol")
 
+    stop_pct = strategy.resolve_stop_pct(expiry, symbols, hist)
     res = strategy.simulate_month(
         list(full.index), merged, days, sectors,
         basket_symbols=basket_symbols, carry_forward=True,
-        candidate_fn=candidate_fn)
+        stop_pct=stop_pct, candidate_fn=candidate_fn)
     holdings, exits, to_buy, mtd = (res.open_positions, res.exits,
                                     res.to_buy, res.return_pct)
 
@@ -180,7 +181,7 @@ def build(as_of: date, session=None) -> Report:
         rpt.sell_orders.append({"symbol": sym, "kind": "MOMENTUM", "limit": None})
 
     band = config.ENTRY_BAND_PCT / 100.0
-    stop = config.V4_STOP_LOSS_PCT / 100.0
+    stop = stop_pct / 100.0
     last_frame = merged.get(as_of)
     for sym in rpt.to_buy:
         ref = None
@@ -374,7 +375,8 @@ def build_entry_sheet(expiry: date, session=None) -> dict:
             veto_ran = False
 
     band = config.ENTRY_BAND_PCT / 100.0
-    stop = config.V4_STOP_LOSS_PCT / 100.0
+    stop_pct_sheet = strategy.resolve_stop_pct(expiry, symbols, hist)
+    stop = stop_pct_sheet / 100.0
     target = config.V4_TARGET_PCT / 100.0
 
     # What are we holding right now? Reconstruct the OUTGOING month (the
@@ -426,7 +428,7 @@ def build_entry_sheet(expiry: date, session=None) -> dict:
 
     return {"expiry": expiry, "rows": rows, "dropped": dropped,
             "veto_ran": veto_ran, "sells": sells, "holds": to_hold,
-            "had_prior_book": bool(current)}
+            "had_prior_book": bool(current), "stop_pct": stop_pct_sheet}
 
 
 def render_entry_sheet(sheet: dict) -> str:
@@ -466,7 +468,7 @@ def render_entry_sheet(sheet: dict) -> str:
         L.append(f"<b>{i}. {esc(r['symbol'])}</b>")
         L.append(f"    Enter at market: {_fmt_money(r['entry_lo'])} – "
                  f"{_fmt_money(r['entry_hi'])}")
-        L.append(f"    SL @{config.V4_STOP_LOSS_PCT:.0f}%: "
+        L.append(f"    SL @{sheet.get('stop_pct', config.V4_STOP_LOSS_PCT):.0f}%: "
                  f"{_fmt_money(r['sl_lo'])} – {_fmt_money(r['sl_hi'])}")
         tp = r.get("target_pct", config.V4_TARGET_PCT)
         L.append(f"    Book at +{tp:.0f}%: "
@@ -478,9 +480,9 @@ def render_entry_sheet(sheet: dict) -> str:
                  "as a fresh buy.</i>")
         L.append("")
 
-    L.append(f"<i>Place the SL as a resting order once the buy fills — it is "
-             f"inside the {config.PRICE_BAND_PCT:.0f}% band and will be "
-             f"accepted.</i>")
+    L.append(f"<i>Place the {sheet.get('stop_pct', config.V4_STOP_LOSS_PCT):.0f}% SL "
+             f"as a resting order once the buy fills. Stop width is set by "
+             f"market breadth on the expiry close.</i>")
     L.append("")
     L.append(f"<i>The +{config.V4_TARGET_PCT:.0f}% target CANNOT be placed "
              f"today. F&amp;O scrips have a dynamic price band of "
@@ -548,7 +550,7 @@ def render(rpt: Report) -> str:
         for o in rpt.buy_orders:
             L.append(f"{esc(o['symbol'])} - MARKET RANGE "
                      f"{_fmt_money(o['lo'])}-{_fmt_money(o['hi'])} "
-                     f"STOP LOSS @{config.V4_STOP_LOSS_PCT:.0f}% - "
+                     f"STOP LOSS - "
                      f"{_fmt_money(o['sl_lo'])}-{_fmt_money(o['sl_hi'])}")
         L.append("")
 

@@ -29,7 +29,7 @@ def normalize_fo_columns(fo_df: pd.DataFrame) -> pd.DataFrame:
             "ChngInOpnIntrst": "change_in_oi",
             "SttlmPric": "settlement_price",
             "TtlTradgVol": "volume",
-        "TtlTrfVal": "turnover",
+            "TtlTrfVal": "turnover",
         }
     ).copy()
     if "expiry_date" in df.columns:

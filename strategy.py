@@ -141,6 +141,54 @@ def load_fo_universe(path: str = None) -> list:
     return symbols
 
 
+def market_breadth(as_of: date, symbols, price_hist: dict) -> float:
+    """
+    Percentage of the universe trading above its own 200-day average.
+
+    Computed on the expiry close, so it is available BEFORE entry. This
+    is the regime signal that picks the stop width -- see
+    config.REGIME_STOP_ENABLED and the table in config.py.
+    """
+    days = [d for d in sorted(price_hist) if d <= as_of]
+    above = []
+    for s in symbols:
+        cl = [float(price_hist[d].at[s, "close_price"]) for d in days
+              if s in price_hist[d].index
+              and pd.notna(price_hist[d].at[s, "close_price"])
+              and price_hist[d].at[s, "close_price"] > 0]
+        if len(cl) < 200:
+            continue
+        above.append(1 if cl[-1] > pd.Series(cl).tail(200).mean() else 0)
+    if not above:
+        logger.warning("Breadth unavailable (no symbol had 200 sessions)")
+        return float("nan")
+    return 100.0 * float(np.mean(above))
+
+
+def resolve_stop_pct(as_of: date, symbols=None, price_hist: dict = None) -> float:
+    """
+    The stop width for the cycle beginning after `as_of`.
+
+    Falls back to the fixed V4_STOP_LOSS_PCT when the regime rule is
+    disabled or breadth cannot be computed -- a missing regime signal
+    must never leave a position without a stop.
+    """
+    if not getattr(config, "REGIME_STOP_ENABLED", False):
+        return config.V4_STOP_LOSS_PCT
+    if price_hist is None or symbols is None:
+        return config.V4_STOP_LOSS_PCT
+    b = market_breadth(as_of, symbols, price_hist)
+    if b != b:
+        logger.warning("Breadth NaN; using fixed %.1f%% stop", config.V4_STOP_LOSS_PCT)
+        return config.V4_STOP_LOSS_PCT
+    wide = b < config.REGIME_BREADTH_THRESHOLD
+    stop = config.REGIME_STOP_WIDE_PCT if wide else config.REGIME_STOP_TIGHT_PCT
+    logger.info("Breadth %.1f%% (threshold %.1f) -> %s market -> %.0f%% stop",
+                b, config.REGIME_BREADTH_THRESHOLD,
+                "beaten-down" if wide else "healthy", stop)
+    return stop
+
+
 def load_sector_map() -> dict:
     if not os.path.exists(config.SECTOR_MAP_FILE):
         logger.warning("Sector map missing at %s -- sector cap disabled",
@@ -546,6 +594,8 @@ def simulate_month(ranked_order, price_by_date, hold_dates, sector_map,
         return (sector_map or {}).get(sym, f"Unclassified:{sym}")
 
     def next_candidate(queued):
+        if not getattr(config, "V4_REDEPLOY_ENABLED", True):
+            return None          # freed slots hold cash to expiry
         """
         Pick the replacement for a freed slot.
 

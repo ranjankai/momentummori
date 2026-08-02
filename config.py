@@ -103,6 +103,15 @@ V4_WEIGHTS = {
     "cost_of_carry": 0.20,
 }
 
+# Liquidity floor. The source deck claims a "minimum traded-value
+# threshold"; we had none -- `volume` was collected in compute_signals
+# and thrown away. F&O eligibility is a decent proxy but is
+# point-in-time: a name can stay eligible while its turnover collapses,
+# and thin plus volatile is exactly where a 5% market-order stop fills
+# badly. Median daily turnover over the window, in INR crore.
+MIN_TURNOVER_CRORE = 5.0
+TURNOVER_LOOKBACK_DAYS = 20
+
 V4_VOL_LOOKBACK_DAYS = 63
 V4_HISTORY_DAYS = 260        # trading days of price history pulled per run
 

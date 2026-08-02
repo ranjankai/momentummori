@@ -322,7 +322,7 @@ def compute_signals(price_hist: dict, fo_today: pd.DataFrame, snapshot: date,
 
     rows = []
     for sym in symbols:
-        closes, vols, close_dates = [], [], []
+        closes, vols, vals, close_dates = [], [], [], []
         for d in dates:
             frame = price_hist[d]
             if sym not in frame.index:
@@ -333,15 +333,23 @@ def compute_signals(price_hist: dict, fo_today: pd.DataFrame, snapshot: date,
             closes.append(float(c))
             close_dates.append(d)
             vols.append(frame.at[sym, "volume"] if "volume" in frame.columns else np.nan)
+            tv = frame.at[sym, "turnover"] if "turnover" in frame.columns else np.nan
+            if pd.notna(tv):
+                vals.append(float(tv))
         if len(closes) < config.V4_VOL_LOOKBACK_DAYS - 10:
             continue
         closes = split_adjust(closes, symbol=sym, dates=close_dates,
                               flagged=flagged)
         s = pd.Series(closes)
         rets = s.pct_change().dropna().tail(config.V4_VOL_LOOKBACK_DAYS)
+        turnover_cr = None
+        if len(vals) >= 5:
+            turnover_cr = float(pd.Series(vals).tail(
+                config.TURNOVER_LOOKBACK_DAYS).median()) / 1e7
         rows.append({
             "symbol": sym,
             "close": closes[-1],
+            "turnover_cr": turnover_cr,
             "volatility": float(rets.std() * np.sqrt(252) * 100),
             "dma10": s.tail(10).mean(),
             "dma20": s.tail(20).mean(),
@@ -376,6 +384,15 @@ def rank_universe(signals: pd.DataFrame, sector_map: dict = None,
     """Z-score each signal, weight, sort, then apply the sector cap greedily."""
     top_n = top_n or config.PORTFOLIO_SIZE
     df = signals.dropna(subset=["volatility", "rollover", "cost_of_carry"]).copy()
+
+    # Liquidity floor. Thin and volatile is where a 5% market-order stop
+    # fills worst, and this strategy deliberately selects volatile names.
+    if "turnover_cr" in df.columns:
+        thin = df["turnover_cr"].notna() & (df["turnover_cr"] < config.MIN_TURNOVER_CRORE)
+        if thin.any():
+            logger.info("Liquidity floor dropped %d name(s) below Rs %.0f cr median turnover",
+                        int(thin.sum()), config.MIN_TURNOVER_CRORE)
+            df = df[~thin]
     if len(df) < top_n:
         raise StrategyError(f"only {len(df)} scoreable symbols, need {top_n}")
 
@@ -419,6 +436,43 @@ class Position:
     stop: float
     target: float
     entry_date: date = None
+    last: float = None
+
+    @property
+    def pnl_pct(self) -> float:
+        if not self.entry or self.last is None:
+            return 0.0
+        return (self.last - self.entry) / self.entry * 100
+
+    @property
+    def pct_to_target(self) -> float:
+        if not self.last:
+            return 0.0
+        return (self.target - self.last) / self.last * 100
+
+    @property
+    def target_placeable(self) -> bool:
+        """
+        True once a sell limit at `target` is inside the exchange's dynamic
+        price band. Below this the order is rejected at entry, which is why
+        the target is not placed on entry day.
+        """
+        if not self.last:
+            return False
+        return self.target <= self.last * (1 + config.PRICE_BAND_PCT / 100.0)
+
+
+@dataclass
+class Exit:
+    symbol: str
+    entry: float
+    exit_px: float
+    reason: str          # STOP | TARGET | ROLLOVER | OFF_MOMENTUM
+    exit_date: date
+
+    @property
+    def pnl_pct(self) -> float:
+        return (self.exit_px - self.entry) / self.entry * 100
 
 
 @dataclass
@@ -430,6 +484,11 @@ class MonthResult:
     trades: int
     slots: list = field(default_factory=list)
     carry: dict = field(default_factory=dict)
+    # Rich detail so daily_report does not need a second simulator.
+    open_positions: list = field(default_factory=list)
+    exits: list = field(default_factory=list)
+    to_buy: list = field(default_factory=list)
+    empty_slots: int = 0
 
 
 def simulate_month(ranked_order, price_by_date, hold_dates, sector_map,
@@ -479,6 +538,7 @@ def simulate_month(ranked_order, price_by_date, hold_dates, sector_map,
     sector_count, banned, pending = {}, set(), []
     pnl = [0.0] * top_n
     chains = [[] for _ in range(top_n)]
+    exits = []
     trades = 0
 
     def sector_of(sym):
@@ -548,6 +608,7 @@ def simulate_month(ranked_order, price_by_date, hold_dates, sector_map,
             pnl[use_slot] += ret
             trades += 1
             chains[use_slot].append((sym, round(ret, 2), "ROLLOVER", str(first)))
+            exits.append(Exit(sym, pos.entry, float(px_open), "ROLLOVER", first))
             if policy != "always":
                 banned.add(sym)
             for cand in ranked_order:
@@ -590,6 +651,7 @@ def simulate_month(ranked_order, price_by_date, hold_dates, sector_map,
             pnl[slot_id] += ret
             trades += 1
             chains[slot_id].append((pos.symbol, round(ret, 2), reason, str(day)))
+            exits.append(Exit(pos.symbol, pos.entry, float(exit_px), reason, day))
             sector_count[sector_of(pos.symbol)] -= 1
             if policy == "never" or (policy == "not_if_stopped" and reason == "STOP"):
                 banned.add(pos.symbol)
@@ -603,6 +665,21 @@ def simulate_month(ranked_order, price_by_date, hold_dates, sector_map,
 
     final = hold_dates[-1]
     frame = price_by_date.get(final)
+
+    # Snapshot the open book with ORIGINAL cost bases, before the
+    # carry-forward branch below re-marks them to the closing price.
+    open_positions = []
+    for slot_id in range(top_n):
+        pos = held.get(slot_id)
+        if pos is None:
+            continue
+        if frame is not None and pos.symbol in frame.index:
+            c = frame.at[pos.symbol, "close_price"]
+            if pd.notna(c) and c > 0:
+                pos.last = float(c)
+        open_positions.append(pos)
+
+    to_buy = [sym for _, sym in pending]
     carry_out = {}
     if carry_forward:
         # Mark still-open positions to the close -- nothing is actually
@@ -645,4 +722,8 @@ def simulate_month(ranked_order, price_by_date, hold_dates, sector_map,
         trades=trades,
         slots=chains,
         carry=carry_out,
+        open_positions=open_positions,
+        exits=exits,
+        to_buy=to_buy,
+        empty_slots=top_n - len(open_positions) - len(to_buy),
     )

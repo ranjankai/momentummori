@@ -12,11 +12,11 @@ WHAT IT ANSWERS
 
 WHY IT RECONSTRUCTS RATHER THAN READS A FILE
 --------------------------------------------
-data/v4_holdings.json is hand-maintained and its `entry` fields are None
-until you type in a fill price. A nightly job cannot depend on that. So
-this module replays the month deterministically from the governing
-expiry's basket plus cached bhavcopy, which needs no bookkeeping and
-cannot drift out of sync with reality.
+A nightly job cannot depend on hand-maintained bookkeeping, so this
+module replays the month deterministically from the governing expiry's
+basket plus cached bhavcopy. It shares ONE engine with the backtest --
+strategy.simulate_month -- so the trading rules exist in exactly one
+place and cannot drift between the two.
 
 "PERFECT EXECUTION" MEANS
 -------------------------
@@ -54,52 +54,11 @@ import strategy
 logger = logging.getLogger("momentum_tracker.daily_report")
 
 
-@dataclass
-class Holding:
-    symbol: str
-    entry: float
-    entry_date: date
-    stop: float
-    target: float
-    last: float = None
-
-    @property
-    def pnl_pct(self) -> float:
-        if not self.entry:
-            return 0.0
-        return (self.last - self.entry) / self.entry * 100
-
-    @property
-    def pct_to_target(self) -> float:
-        """How far the stock still has to travel to reach the target."""
-        if not self.last:
-            return 0.0
-        return (self.target - self.last) / self.last * 100
-
-    @property
-    def target_placeable(self) -> bool:
-        """
-        True once a sell limit at `target` is inside the exchange's dynamic
-        price band, measured off the latest close. Below this it is
-        rejected at order entry, which is why the target is NOT placed on
-        entry day.
-        """
-        if not self.last:
-            return False
-        return self.target <= self.last * (1 + config.PRICE_BAND_PCT / 100.0)
-
-
-@dataclass
-class Exit:
-    symbol: str
-    entry: float
-    exit_px: float
-    reason: str          # STOP | TARGET | ROLLOVER
-    exit_date: date
-
-    @property
-    def pnl_pct(self) -> float:
-        return (self.exit_px - self.entry) / self.entry * 100
+# Holding/Exit now live in strategy.py -- daily_report used to carry its
+# own copies plus a second simulator, which meant every trading rule was
+# implemented twice and had to be changed twice. One engine now.
+Holding = strategy.Position
+Exit = strategy.Exit
 
 
 @dataclass
@@ -118,6 +77,9 @@ class Report:
     flagged_actions: list = field(default_factory=list)
     veto_dropped: list = field(default_factory=list)
     veto_ran: bool = True
+    # Exited names marked to today's close, so a bad exit is visible:
+    # if `now_pct` exceeds `exit_pct`, selling cost money.
+    exited_review: list = field(default_factory=list)
 
 
 def governing_expiry(as_of: date, trading_days=None) -> date:
@@ -132,178 +94,6 @@ def governing_expiry(as_of: date, trading_days=None) -> date:
         y, m = (y - 1, 12) if m == 1 else (y, m - 1)
         exp = strategy.expiry_for(y, m, trading_days=trading_days)
     return exp
-
-
-def load_actual_fills() -> dict:
-    """
-    Recorded real fills, {SYMBOL: {"entry": float, "entry_date": "YYYY-MM-DD"}}.
-
-    Empty dict when the file is absent or unreadable -- the report then
-    falls back to the reconstructed open, which is right whenever you
-    traded on schedule.
-    """
-    import json
-    path = config.ACTUAL_FILLS_FILE
-    if not os.path.exists(path):
-        return {}
-    try:
-        with open(path, encoding="utf-8") as fh:
-            raw = json.load(fh)
-        return {str(k).strip().upper(): v for k, v in raw.items()}
-    except (OSError, ValueError) as exc:
-        logger.error("Unreadable %s (%s) -- falling back to reconstructed "
-                     "entries. Stops and targets WILL be wrong if you "
-                     "entered off-schedule.", path, exc)
-        return {}
-
-
-def _simulate_to_date(ranked_order, price_by_date, hold_dates, sector_map,
-                      basket_symbols, top_n=None, stop_pct=None,
-                      target_pct=None, policy=None, fills=None):
-    """
-    Lockstep slot replay from entry day to `hold_dates[-1]`, retaining the
-    ORIGINAL cost basis of every open position (which simulate_month
-    discards when it marks to close for carry-forward).
-
-    Mirrors strategy.simulate_month exactly in its trading rules --
-    same lockstep advance, same next-session redeployment, same re-entry
-    policy. tests assert the resulting return matches.
-    """
-    top_n = top_n or config.PORTFOLIO_SIZE
-    stop_pct = config.V4_STOP_LOSS_PCT if stop_pct is None else stop_pct
-    target_pct = config.V4_TARGET_PCT if target_pct is None else target_pct
-    policy = policy or config.V4_REENTRY_POLICY
-    max_per_sector = max(1, int(top_n * config.MAX_SECTOR_WEIGHT_PCT / 100))
-
-    held = {i: None for i in range(top_n)}
-    sector_count, banned, pending = {}, set(), []
-    pnl = [0.0] * top_n
-    exits = []
-
-    def sector_of(s):
-        return (sector_map or {}).get(s, f"Unclassified:{s}")
-
-    def available(s):
-        if s in banned:
-            return False
-        if any(p and p.symbol == s for p in held.values()):
-            return False
-        if sector_map and sector_count.get(sector_of(s), 0) >= max_per_sector:
-            return False
-        return True
-
-    def open_position(slot, sym, day):
-        # A recorded real fill always wins over the reconstructed open.
-        # Everything downstream -- stop, target, P&L -- is derived from
-        # the entry price, so using the wrong one produces orders that
-        # look plausible and are materially wrong.
-        override = (fills or {}).get(sym)
-        if override and override.get("entry"):
-            px = float(override["entry"])
-            entry_day = day
-            raw = override.get("entry_date")
-            if raw:
-                try:
-                    entry_day = pd.to_datetime(raw).date()
-                except (ValueError, TypeError):
-                    logger.warning("Unparseable entry_date %r for %s", raw, sym)
-            last = px
-            frame = price_by_date.get(day)
-            if frame is not None and sym in frame.index:
-                c = frame.at[sym, "close_price"]
-                if pd.notna(c) and c > 0:
-                    last = float(c)
-            held[slot] = Holding(sym, px, entry_day,
-                                 px * (1 - stop_pct / 100),
-                                 px * (1 + target_pct / 100), last)
-            sector_count[sector_of(sym)] = sector_count.get(sector_of(sym), 0) + 1
-            logger.info("%s: using recorded fill %.2f (%s) instead of the "
-                        "reconstructed open", sym, px, entry_day)
-            return True
-
-        frame = price_by_date.get(day)
-        if frame is None or sym not in frame.index:
-            return False
-        px = frame.at[sym, "open_price"]
-        if pd.isna(px) or px <= 0:
-            return False
-        px = float(px)
-        held[slot] = Holding(sym, px, day,
-                             px * (1 - stop_pct / 100),
-                             px * (1 + target_pct / 100), px)
-        sector_count[sector_of(sym)] = sector_count.get(sector_of(sym), 0) + 1
-        return True
-
-    first = hold_dates[0]
-    slot = 0
-    for sym in basket_symbols:
-        if slot >= top_n:
-            break
-        if available(sym) and open_position(slot, sym, first):
-            slot += 1
-
-    for i in range(1, len(hold_dates)):
-        day = hold_dates[i]
-        for slot_id, sym in pending:
-            if available(sym):
-                open_position(slot_id, sym, day)
-        pending = []
-
-        frame = price_by_date.get(day)
-        if frame is None:
-            continue
-        for slot_id in range(top_n):
-            pos = held.get(slot_id)
-            if pos is None or pos.symbol not in frame.index:
-                continue
-            low = frame.at[pos.symbol, "low_price"]
-            high = frame.at[pos.symbol, "high_price"]
-            close = frame.at[pos.symbol, "close_price"]
-            if pd.notna(close) and close > 0:
-                pos.last = float(close)
-
-            exit_px, reason = None, None
-            if pd.notna(low) and low <= pos.stop:
-                exit_px, reason = pos.stop, "STOP"
-            elif pd.notna(high) and high >= pos.target:
-                exit_px, reason = pos.target, "TARGET"
-            if exit_px is None:
-                continue
-
-            pnl[slot_id] += (exit_px - pos.entry) / pos.entry * 100
-            exits.append(Exit(pos.symbol, pos.entry, exit_px, reason, day))
-            sector_count[sector_of(pos.symbol)] -= 1
-            if policy == "never" or (policy == "not_if_stopped" and reason == "STOP"):
-                banned.add(pos.symbol)
-            held[slot_id] = None
-            if i < len(hold_dates) - 1:
-                for cand in ranked_order:
-                    if available(cand) and cand not in [s for _, s in pending]:
-                        pending.append((slot_id, cand))
-                        break
-
-    # Mark open positions to the last close -- unrealised, but that is
-    # what "month to date" means.
-    open_positions = []
-    for slot_id in range(top_n):
-        pos = held.get(slot_id)
-        if pos is None:
-            continue
-        pnl[slot_id] += pos.pnl_pct
-        open_positions.append(pos)
-
-    # Names queued for tomorrow's open, plus any slot still empty.
-    to_buy = [sym for _, sym in pending]
-    empty = top_n - len(open_positions) - len(to_buy)
-    if empty > 0:
-        for cand in ranked_order:
-            if empty <= 0:
-                break
-            if available(cand) and cand not in to_buy:
-                to_buy.append(cand)
-                empty -= 1
-
-    return open_positions, exits, to_buy, float(sum(pnl) / top_n)
 
 
 def build(as_of: date, session=None) -> Report:
@@ -336,9 +126,22 @@ def build(as_of: date, session=None) -> Report:
         raise strategy.StrategyError(
             f"No trading days between governing expiry {expiry} and {as_of}")
 
-    holdings, exits, to_buy, mtd = _simulate_to_date(
-        list(full.index), merged, days, sectors, basket_symbols,
-        fills=load_actual_fills())
+    # ONE engine, shared with the backtest.
+    #
+    # carry_forward=True is deliberate: it marks still-open positions to
+    # the last CLOSE, which is what "month to date" means for a book that
+    # has not been sold. carry_forward=False takes the other branch and
+    # force-sells at the final day's OPEN, which understated MTD by
+    # 0.30pp when this was first wired.
+    #
+    # The re-marking that carry_forward does to carry_out does not reach
+    # us: simulate_month snapshots open_positions with their ORIGINAL
+    # cost bases before that branch runs.
+    res = strategy.simulate_month(
+        list(full.index), merged, days, sectors,
+        basket_symbols=basket_symbols, carry_forward=True)
+    holdings, exits, to_buy, mtd = (res.open_positions, res.exits,
+                                    res.to_buy, res.return_pct)
 
     rpt = Report(as_of=as_of, expiry=expiry, entry_date=days[0],
                  holdings=holdings, exits=exits, to_buy=to_buy,
@@ -380,6 +183,47 @@ def build(as_of: date, session=None) -> Report:
             "lo": round(lo, 2), "hi": round(hi, 2),
             "sl_lo": round(lo * (1 - stop), 2),
             "sl_hi": round(hi * (1 - stop), 2),
+        })
+
+    # --- daily off-momentum judgement ----------------------------------
+    # Mid-month only; expiry day is mechanical. Additive to the 5% stop:
+    # it can bring a position out early and can do nothing else.
+    if config.LLM_EXIT_ENABLED and rpt.holdings:
+        import llm_judgment
+        for h in rpt.holdings:
+            try:
+                feat = llm_judgment.build_features(h.symbol, as_of, merged,
+                                                   entry=h.entry)
+                held_days = len([x for x in days if x >= h.entry_date])
+                v = llm_judgment.exit_judgement(h.symbol, feat, held_days,
+                                                h.entry, h.stop)
+            except Exception as exc:
+                logger.error("Exit judgement failed for %s: %s", h.symbol, exc)
+                continue
+            if v.get("exit_now"):
+                rpt.sell_orders.append({
+                    "symbol": h.symbol, "kind": "OFF_MOMENTUM", "limit": None,
+                    "reason": v.get("exit_reason", ""),
+                    "confidence": v.get("confidence"),
+                })
+
+    # --- how have the exits aged? --------------------------------------
+    # Mark every closed trade to today's close. If the stock is higher
+    # now than where we sold, the exit was wrong -- and it should be
+    # visible rather than quietly forgotten.
+    today_frame = merged.get(as_of)
+    for e in rpt.exits:
+        now = None
+        if today_frame is not None and e.symbol in today_frame.index:
+            c = today_frame.at[e.symbol, "close_price"]
+            if pd.notna(c) and c > 0:
+                now = float(c)
+        rpt.exited_review.append({
+            "symbol": e.symbol,
+            "reason": e.reason,
+            "exit_pct": round(e.pnl_pct, 2),
+            "now_pct": round((now - e.entry) / e.entry * 100, 2) if now else None,
+            "exit_date": e.exit_date,
         })
 
     if config.VETO_ENABLED:
@@ -462,6 +306,47 @@ def build_entry_sheet(expiry: date, session=None) -> dict:
     basket, full = strategy.rank_universe(signals, sectors)
 
     kept, dropped, added, veto_ran = (basket["symbol"].tolist(), [], [], True)
+    # --- daily off-momentum judgement ----------------------------------
+    # Mid-month only; expiry day is mechanical. Additive to the 5% stop:
+    # it can bring a position out early and can do nothing else.
+    if config.LLM_EXIT_ENABLED and rpt.holdings:
+        import llm_judgment
+        for h in rpt.holdings:
+            try:
+                feat = llm_judgment.build_features(h.symbol, as_of, merged,
+                                                   entry=h.entry)
+                held_days = len([x for x in days if x >= h.entry_date])
+                v = llm_judgment.exit_judgement(h.symbol, feat, held_days,
+                                                h.entry, h.stop)
+            except Exception as exc:
+                logger.error("Exit judgement failed for %s: %s", h.symbol, exc)
+                continue
+            if v.get("exit_now"):
+                rpt.sell_orders.append({
+                    "symbol": h.symbol, "kind": "OFF_MOMENTUM", "limit": None,
+                    "reason": v.get("exit_reason", ""),
+                    "confidence": v.get("confidence"),
+                })
+
+    # --- how have the exits aged? --------------------------------------
+    # Mark every closed trade to today's close. If the stock is higher
+    # now than where we sold, the exit was wrong -- and it should be
+    # visible rather than quietly forgotten.
+    today_frame = merged.get(as_of)
+    for e in rpt.exits:
+        now = None
+        if today_frame is not None and e.symbol in today_frame.index:
+            c = today_frame.at[e.symbol, "close_price"]
+            if pd.notna(c) and c > 0:
+                now = float(c)
+        rpt.exited_review.append({
+            "symbol": e.symbol,
+            "reason": e.reason,
+            "exit_pct": round(e.pnl_pct, 2),
+            "now_pct": round((now - e.entry) / e.entry * 100, 2) if now else None,
+            "exit_date": e.exit_date,
+        })
+
     if config.VETO_ENABLED:
         try:
             import surveillance
@@ -497,6 +382,13 @@ def build_entry_sheet(expiry: date, session=None) -> dict:
         if close is None or close <= 0:
             continue
         lo, hi = close * (1 - band), close * (1 + band)
+
+        feat = llm_judgment.build_features(sym, expiry, hist, entry=close,
+                                           signals=signals,
+                                           universe_stats=universe_stats)
+        tgt = llm_judgment.get_or_set_target(sym, close, expiry, feat)
+        target = tgt["target_pct"] / 100.0
+
         rows.append({
             "symbol": sym,
             "sector": sectors.get(sym, "Unclassified"),
@@ -504,6 +396,9 @@ def build_entry_sheet(expiry: date, session=None) -> dict:
             "entry_lo": lo, "entry_hi": hi,
             "sl_lo": lo * (1 - stop), "sl_hi": hi * (1 - stop),
             "tgt_lo": lo * (1 + target), "tgt_hi": hi * (1 + target),
+            "target_pct": tgt["target_pct"],
+            "target_source": tgt["source"],
+            "target_basis": tgt.get("basis", ""),
             "action": "HOLD" if sym in current else "BUY",
         })
 
@@ -556,9 +451,9 @@ def render_entry_sheet(sheet: dict) -> str:
                  f"{_fmt_money(r['entry_hi'])}")
         L.append(f"    SL @{config.V4_STOP_LOSS_PCT:.0f}%: "
                  f"{_fmt_money(r['sl_lo'])} – {_fmt_money(r['sl_hi'])}")
-        L.append(f"    Book at +{config.V4_TARGET_PCT:.0f}%: "
-                 f"{_fmt_money(r['tgt_lo'])} – {_fmt_money(r['tgt_hi'])} "
-                 f"<i>(do not place yet)</i>")
+        tp = r.get("target_pct", config.V4_TARGET_PCT)
+        L.append(f"    Book at +{tp:.0f}%: "
+                 f"{_fmt_money(r['tgt_lo'])} – {_fmt_money(r['tgt_hi'])}")
         L.append("")
 
     if not sheet.get("had_prior_book", True):
@@ -606,7 +501,8 @@ def render(rpt: Report) -> str:
     L = [f"<b>Momentum Tracker — {rpt.as_of:%d-%m-%y}</b>", ""]
 
     sign = "+" if rpt.mtd_return_pct >= 0 else ""
-    L.append(f"<b>Month to date: {sign}{rpt.mtd_return_pct:.2f}%</b>")
+    L.append(f"<b>Cycle performance: {sign}{rpt.mtd_return_pct:.2f}%</b>")
+    L.append(f"<i>since the {rpt.expiry:%d-%m-%y} expiry</i>")
     L.append("")
 
     today_exits = [e for e in rpt.exits if e.exit_date == rpt.as_of]
@@ -624,6 +520,8 @@ def render(rpt: Report) -> str:
             if o["kind"] == "TARGET":
                 L.append(f"{esc(o['symbol'])} - TARGET - PLACE AT LIMIT "
                          f"{_fmt_money(o['limit'])}")
+            elif o["kind"] == "OFF_MOMENTUM":
+                L.append(f"{esc(o['symbol'])} - OFF MOMENTUM - AT MARKET")
             else:
                 L.append(f"{esc(o['symbol'])} - MOMENTUM - AT MARKET")
         L.append("")
@@ -643,5 +541,18 @@ def render(rpt: Report) -> str:
             s = "+" if h.pnl_pct >= 0 else ""
             L.append(f"{esc(h.symbol)}  {_fmt_money(h.last)}  "
                      f"({s}{h.pnl_pct:.1f}%)")
+        L.append("")
+
+    if rpt.exited_review:
+        L.append("<b>Exited</b>")
+        for e in rpt.exited_review:
+            x = f"{'+' if e['exit_pct'] >= 0 else ''}{e['exit_pct']:.1f}%"
+            if e["now_pct"] is None:
+                L.append(f"{esc(e['symbol'])} (exited at {x})")
+                continue
+            y = f"{'+' if e['now_pct'] >= 0 else ''}{e['now_pct']:.1f}%"
+            worse = e["now_pct"] > e["exit_pct"]
+            L.append(f"{esc(e['symbol'])} (exited at {x}, today at {y})"
+                     + ("  \u2190 left on the table" if worse else ""))
 
     return "\n".join(L).strip()

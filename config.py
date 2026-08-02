@@ -378,7 +378,7 @@ LLM_TARGET_MAX_PCT = 40.0
 # upside does not clear this, the capital is better left in cash than
 # put at equity risk for nothing.
 RISK_FREE_ANNUAL_PCT = 8.0
-LLM_TARGET_MIN_PCT = round(RISK_FREE_ANNUAL_PCT / 12, 2)   # 0.67
+LLM_TARGET_MIN_PCT = 1.0         # rounded up from 8/12 = 0.67
 
 # Cash sitting in an unfilled slot is a deliberate position, so it earns
 # the risk-free rate pro-rata rather than nothing. Without this an empty

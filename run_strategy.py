@@ -269,7 +269,29 @@ def cmd_sheet(args):
     import alerts
     import daily_report
 
-    expiry = datetime.strptime(args.expiry, "%Y-%m-%d").date()
+    if args.expiry:
+        expiry = datetime.strptime(args.expiry, "%Y-%m-%d").date()
+    else:
+        # Self-computing so the scheduled task never needs editing. NSE
+        # moved monthly expiry to the last Tuesday from Sep-2025, and a
+        # holiday rolls it BACK, so this is resolved against the actual
+        # trading calendar rather than assumed.
+        today = date.today()
+        # The current month's expiry is in the FUTURE and therefore not in
+        # the cached trading calendar, so the holiday roll-back cannot
+        # resolve it. Seed the calendar with today (we only ever run this
+        # on a trading evening) and fall back to the raw last-Tuesday if
+        # it still cannot be placed.
+        cal = strategy.known_trading_days() | {today}
+        try:
+            expiry = strategy.expiry_for(today.year, today.month, trading_days=cal)
+        except strategy.StrategyError:
+            expiry = strategy.expiry_for(today.year, today.month)
+        if expiry != today and not args.force:
+            print(f"Today ({today}) is not the monthly expiry "
+                  f"({expiry}) — nothing sent. Use --force to override.")
+            return
+
     try:
         sheet = daily_report.build_entry_sheet(expiry)
         text = daily_report.render_entry_sheet(sheet)
@@ -350,8 +372,10 @@ def main():
     h.set_defaults(func=cmd_history)
 
     sh = sub.add_parser("sheet", help="monthly order sheet, run on expiry evening")
-    sh.add_argument("--expiry", required=True, help="YYYY-MM-DD (the expiry date)")
+    sh.add_argument("--expiry", help="YYYY-MM-DD; omit to auto-detect today's expiry")
     sh.add_argument("--no-send", action="store_true")
+    sh.add_argument("--force", action="store_true",
+                    help="run even if today is not the monthly expiry")
     sh.set_defaults(func=cmd_sheet)
 
     d = sub.add_parser("daily", help="build and send the evening basket note")

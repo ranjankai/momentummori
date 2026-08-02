@@ -329,6 +329,82 @@ LEDGER_ENABLED = True
 
 
 # ---------------------------------------------------------------------------
+# ACTUAL FILLS
+#
+# daily_report reconstructs the month from bhavcopy, which assumes you
+# entered at the session open after expiry. When your real fill differs
+# -- a delayed start, a partial, a gap -- every level derived from it is
+# wrong: the 5% stop, the 40% target and the P&L.
+#
+# This file overrides the reconstruction per symbol:
+#
+#   { "KAYNES": {"entry": 3804.60, "entry_date": "2026-08-03"} }
+#
+# Symbols not listed keep the reconstructed entry. Delete an entry once
+# the position is closed. Gitignored -- it is personal position data.
+# ---------------------------------------------------------------------------
+
+ACTUAL_FILLS_FILE = os.path.join(DATA_DIR, "actual_fills.json")
+
+
+# ---------------------------------------------------------------------------
+# LLM JUDGMENT LAYER (llm_judgment.py)
+#
+# Two jobs, deliberately separate:
+#
+#   TARGET  -- set ONCE, on entry day, per stock. Recomputed only if the
+#              name carries into a new month (new cost basis). Never
+#              recomputed intra-month.
+#   EXIT    -- evaluated DAILY, mid-month only. Additive to the 5% stop;
+#              it can bring a position out early, nothing more.
+#
+# Expiry day is mechanical. The rank decides. No LLM call is made.
+#
+# The model only ever sees numbers computed in this run -- DMAs, Donchian
+# levels, ATR, realised vol, rollover and carry trends. It is never shown
+# a chart and never asked to recall a level.
+# ---------------------------------------------------------------------------
+
+LLM_TARGET_ENABLED = False       # turn on once you have seen targets behave
+LLM_EXIT_ENABLED = False         # turn on separately, after targets
+
+# HARD CEILING. The model may propose any target up to this and no
+# higher; anything above is clamped. V4_TARGET_PCT remains the fallback
+# when the layer is off or the response fails validation.
+LLM_TARGET_MAX_PCT = 40.0
+LLM_TARGET_MIN_PCT = 8.0         # below this a target is not worth placing
+
+LLM_JUDGMENT_FILE = os.path.join(DATA_DIR, "llm_targets.json")
+
+# Mid-month replacement selection.
+#
+# The monthly composite (vol/rollover/carry) CANNOT be recomputed between
+# expiries: measured 02-Aug-2026 over the Jul-2026 cycle, rollover's rank
+# correlation with the previous snapshot sits at 0.84-0.95 for three
+# weeks -- frozen -- and its mid-cycle rank correlation with the expiry
+# value is -0.1. A mid-month reading is not a weak version of the signal,
+# it is unrelated to it.
+#
+# So mid-month candidate selection uses CASH DATA ONLY: price-based
+# relative strength, recomputed daily. Derivatives are not consulted.
+LLM_CANDIDATE_ENABLED = False
+
+# Mechanical price-based RS, used to build the shortlist the LLM chooses
+# from AND as the fallback when the LLM is off or fails. Weights sum to 1.
+RS_WEIGHTS = {
+    "ret_126d": 0.30,     # 6-month relative strength
+    "ret_63d": 0.30,      # 3-month
+    "above_dma50": 0.20,  # trend confirmation
+    "volatility": 0.20,   # keeps the volatility tilt that the backtest found
+}
+
+# How many names the LLM chooses between. Small enough that every option
+# is already defensible -- the model picks within a good set, it does not
+# range over the whole universe.
+CANDIDATE_SHORTLIST_N = 12
+
+
+# ---------------------------------------------------------------------------
 # PRE-ORDER SURVEILLANCE VETO (surveillance.py)
 #
 # Exclusion only -- it can drop a name from the basket, never promote one.

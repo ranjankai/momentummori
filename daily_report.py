@@ -42,6 +42,7 @@ open; it is not, and cannot be, real-time.
 """
 
 import logging
+import os
 from dataclasses import dataclass, field
 from datetime import date
 
@@ -133,9 +134,32 @@ def governing_expiry(as_of: date, trading_days=None) -> date:
     return exp
 
 
+def load_actual_fills() -> dict:
+    """
+    Recorded real fills, {SYMBOL: {"entry": float, "entry_date": "YYYY-MM-DD"}}.
+
+    Empty dict when the file is absent or unreadable -- the report then
+    falls back to the reconstructed open, which is right whenever you
+    traded on schedule.
+    """
+    import json
+    path = config.ACTUAL_FILLS_FILE
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, encoding="utf-8") as fh:
+            raw = json.load(fh)
+        return {str(k).strip().upper(): v for k, v in raw.items()}
+    except (OSError, ValueError) as exc:
+        logger.error("Unreadable %s (%s) -- falling back to reconstructed "
+                     "entries. Stops and targets WILL be wrong if you "
+                     "entered off-schedule.", path, exc)
+        return {}
+
+
 def _simulate_to_date(ranked_order, price_by_date, hold_dates, sector_map,
                       basket_symbols, top_n=None, stop_pct=None,
-                      target_pct=None, policy=None):
+                      target_pct=None, policy=None, fills=None):
     """
     Lockstep slot replay from entry day to `hold_dates[-1]`, retaining the
     ORIGINAL cost basis of every open position (which simulate_month
@@ -169,6 +193,34 @@ def _simulate_to_date(ranked_order, price_by_date, hold_dates, sector_map,
         return True
 
     def open_position(slot, sym, day):
+        # A recorded real fill always wins over the reconstructed open.
+        # Everything downstream -- stop, target, P&L -- is derived from
+        # the entry price, so using the wrong one produces orders that
+        # look plausible and are materially wrong.
+        override = (fills or {}).get(sym)
+        if override and override.get("entry"):
+            px = float(override["entry"])
+            entry_day = day
+            raw = override.get("entry_date")
+            if raw:
+                try:
+                    entry_day = pd.to_datetime(raw).date()
+                except (ValueError, TypeError):
+                    logger.warning("Unparseable entry_date %r for %s", raw, sym)
+            last = px
+            frame = price_by_date.get(day)
+            if frame is not None and sym in frame.index:
+                c = frame.at[sym, "close_price"]
+                if pd.notna(c) and c > 0:
+                    last = float(c)
+            held[slot] = Holding(sym, px, entry_day,
+                                 px * (1 - stop_pct / 100),
+                                 px * (1 + target_pct / 100), last)
+            sector_count[sector_of(sym)] = sector_count.get(sector_of(sym), 0) + 1
+            logger.info("%s: using recorded fill %.2f (%s) instead of the "
+                        "reconstructed open", sym, px, entry_day)
+            return True
+
         frame = price_by_date.get(day)
         if frame is None or sym not in frame.index:
             return False
@@ -285,7 +337,8 @@ def build(as_of: date, session=None) -> Report:
             f"No trading days between governing expiry {expiry} and {as_of}")
 
     holdings, exits, to_buy, mtd = _simulate_to_date(
-        list(full.index), merged, days, sectors, basket_symbols)
+        list(full.index), merged, days, sectors, basket_symbols,
+        fills=load_actual_fills())
 
     rpt = Report(as_of=as_of, expiry=expiry, entry_date=days[0],
                  holdings=holdings, exits=exits, to_buy=to_buy,

@@ -191,6 +191,40 @@ def cmd_backtest(args):
         print(f"Saved -> {out}")
 
 
+def resolve_expiry(day: date) -> date:
+    """
+    The monthly F&O expiry for `day`'s month, holiday-adjusted.
+
+    The raw rule is last Thursday (to Aug-2025) / last Tuesday (from
+    Sep-2025). A future expiry cannot be checked against
+    known_trading_days() -- that set is inferred from cached bhavcopy,
+    which only covers the past -- so NSE's forward holiday feed is used
+    and rolls the date BACK to the previous trading day.
+
+    Falls back to the raw last-weekday if the feed is unreachable.
+    """
+    raw = strategy.expiry_for(day.year, day.month)
+    try:
+        import nse_corporate
+        holidays = nse_corporate.fetch_trading_holidays()
+    except Exception as exc:
+        logging.getLogger("momentum_tracker").warning(
+            "Holiday feed unavailable (%s); using raw last-weekday %s", exc, raw)
+        return raw
+    out, guard = raw, 0
+    while (out in holidays or out.weekday() >= 5) and guard < 10:
+        out -= timedelta(days=1)
+        guard += 1
+    return out
+
+
+def _is_expiry(day: date) -> bool:
+    try:
+        return resolve_expiry(day) == day
+    except strategy.StrategyError:
+        return False
+
+
 def _is_trading_day(day: date) -> bool:
     """
     True if NSE published a cash-market bhavcopy for `day`.
@@ -282,21 +316,7 @@ def cmd_sheet(args):
         # resolve it. Seed the calendar with today (we only ever run this
         # on a trading evening) and fall back to the raw last-Tuesday if
         # it still cannot be placed.
-        raw = strategy.expiry_for(today.year, today.month)
-        try:
-            import nse_corporate
-            holidays = nse_corporate.fetch_trading_holidays()
-        except Exception as exc:
-            logging.getLogger("momentum_tracker").warning(
-                "Holiday feed unavailable (%s); using raw last-weekday %s", exc, raw)
-            holidays = set()
-        expiry = raw
-        guard = 0
-        while (expiry in holidays or expiry.weekday() >= 5) and guard < 10:
-            expiry -= timedelta(days=1)
-            guard += 1
-        if expiry != raw:
-            print(f"Expiry rolled back {raw} -> {expiry} (exchange holiday)")
+        expiry = resolve_expiry(today)
         if expiry != today and not args.force:
             print(f"Today ({today}) is not the monthly expiry "
                   f"({expiry}) — nothing sent. Use --force to override.")
@@ -310,14 +330,27 @@ def cmd_sheet(args):
         alerts.send_failure(f"entry sheet for {expiry}", exc)
         raise
 
+    # Expiry evening sends TWO messages, in this order:
+    #   1. the running scorecard -- how each month has gone
+    #   2. this sheet -- what to actually place at tomorrow's open
+    # Scorecard first, so the actionable sheet is the last thing on
+    # screen when the phone is opened in the morning.
+    import ledger
+    perf_text = daily_report.render_performance(ledger.performance())
+
+    print(perf_text)
+    print()
     print(text)
     if args.no_send:
-        print("\n(--no-send: not delivered)")
+        print("\n(--no-send: neither message delivered)")
         return
-    if not alerts.send(text):
+
+    ok_perf = alerts.send(perf_text)
+    ok_sheet = alerts.send(text)
+    if not (ok_perf and ok_sheet):
         print("\nDELIVERY FAILED -- see logs/app.log", file=sys.stderr)
         sys.exit(2)
-    print(f"\nDelivered to Telegram chat {config.TELEGRAM_CHAT_ID}")
+    print(f"\nBoth messages delivered to Telegram chat {config.TELEGRAM_CHAT_ID}")
 
 
 def cmd_daily(args):
@@ -340,6 +373,14 @@ def cmd_daily(args):
     # an alarm every Saturday and training you to ignore alerts.
     if not args.force and not _is_trading_day(as_of):
         print(f"{as_of} is not a trading day (no bhavcopy) — nothing sent.")
+        return
+
+    # On expiry evening the `sheet` job sends the scorecard and next
+    # month's orders. This note would be a redundant third message about
+    # a basket that is being replaced tomorrow, so stand down.
+    if not args.force and _is_expiry(as_of):
+        print(f"{as_of} is the monthly expiry — the sheet job covers "
+              f"tonight, nothing sent here.")
         return
 
     try:

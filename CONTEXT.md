@@ -147,7 +147,7 @@ Net of 0.35%/trade costs the default variant is roughly **+23%**.
   months. Best t-stat achieved anywhere in this work is ~1.2. Nothing
   here is statistically established.
 
-## V5 Strategy (in progress — uncommitted)
+## V5 Strategy (committed 01-Aug-2026)
 
 V5 = V4 plus cross-month carry-forward. Currently **one confirmed change**,
 implemented in `strategy.py` (`simulate_month`, `carry_forward` param) and
@@ -183,41 +183,123 @@ Two other changes were referenced in conversation (01-Aug-2026) but are
 basket run can tell HOLD from SELL from BUY. Not yet backtested against
 the V4 table above — no verified accrued-return numbers exist for V5 yet.
 
-## Alerts Engine (planned — not yet built)
+## Runtime — how this actually runs (01-Aug-2026)
 
-Goal: notify the user of BUY/SELL/HOLD actions from each day's V4/V5
-basket run, without polling or a new pipeline.
+Everything below runs on the user's Windows machine. **Cowork plays no
+part at runtime** — it was the build environment only.
 
-- **Trigger point**: hook into `run_strategy.py`'s existing action list
-  (the BUY/SELL/HOLD diff against `v4_holdings.json`, ~line 89) — do not
-  build a separate signal-detection path.
-- **Events**: BUY (new entry), SELL–stop hit, SELL–target hit,
-  SELL–rollover (dropped from basket). HOLD-carried-forward alerts
-  default OFF (likely too noisy).
-- **Hard limitation**: this is EOD-only. Data source is daily bhavcopy,
-  not a live broker feed, so a stop/target that fills intra-day is only
-  known about at the *next* EOD run — same gap already noted under
-  Broker Integration below. Not real-time until that's built.
-- **New module**: `alerts.py` — `send_alert(event_type, symbol, details)`,
-  wrapping the actual send in try/except with the same retry+backoff
-  pattern `config.py` uses for NSE fetches (`RETRY_BACKOFF_BASE_SECONDS`).
-  Every attempt (success/fail) logged to `logs/`. A failed alert must
-  never crash or block the strategy run.
-- **Config**: `config.py` gets `ALERTS_ENABLED`, `ALERT_CHANNEL`. Actual
-  credentials (Telegram bot token / SMTP creds) come from environment
-  variables — never hardcoded, per repo git hygiene rules.
-- **Open decision**: delivery channel not yet chosen — Telegram bot
-  (simpler, push to phone, no app-password setup) vs. email/SMTP (more
-  familiar, easy to archive). Needs user decision before `alerts.py` is
-  written.
-- **Scheduling — architecture decision made 01-Aug-2026**: user wants
-  this to run via a Cowork scheduled task (`mcp__scheduled-tasks`), not
-  Windows Task Scheduler, *provided* the Cowork sandbox that executes it
-  can reach `nsearchives.nseindia.com` (see network-egress KI above —
-  must be verified in a fresh session before committing to this path).
-  Fallback if Cowork sandbox egress doesn't hold up in practice: Windows
-  Task Scheduler running `python run_strategy.py` locally, same as any
-  other local cron use of this repo.
+Two scheduled entries in Windows Task Scheduler, both with *Start in* set
+to the repo root (without it `.env` and `data/` do not resolve):
+
+| when | command |
+|---|---|
+| weekdays 19:30 IST | `run_strategy.py daily` |
+| expiry evening | `run_strategy.py sheet --expiry YYYY-MM-DD` then `perf` |
+
+Chain for the nightly run:
+
+1. Task Scheduler fires `.venv\Scripts\python.exe run_strategy.py daily`.
+2. Trading-day guard: weekend or `.nodata` marker → exit silently, no
+   message. Only real failures alert.
+3. `nse_client` fetches the day's CM bhavcopy (disk cache first).
+4. `strategy.load_price_history` assembles 260 trading days.
+5. `strategy.compute_signals_cached` scores the universe; on a
+   day-on-day ratio breach outside 0.6–1.8 it calls
+   `corporate_actions.classify` → `nse_corporate` (NSE filings) →
+   `llm` (Gemini) → cached verdict.
+6. `daily_report.build` replays the month from the governing expiry and
+   produces exits, orders and MTD.
+7. `surveillance` drops any basket name currently under ASM.
+8. `ledger.record` writes the audit trail **before** delivery.
+9. `alerts.send` pushes to Telegram.
+
+External dependencies at runtime: `nsearchives.nseindia.com` (bhavcopy),
+`www.nseindia.com/api` (corporate actions, ASM),
+`generativelanguage.googleapis.com` (Gemini, only on a ratio breach),
+`api.telegram.org` (delivery). Every one of them fails soft.
+
+## Alerts Engine (BUILT — 01-Aug-2026)
+
+Telegram, not WhatsApp. WhatsApp was rejected: business-initiated
+messages need Meta Business onboarding, a dedicated phone number, and
+pre-approved templates. Telegram needed a BotFather token.
+
+- `alerts.py` — `send(text)` and `send_failure(context, exc)`. Retry +
+  backoff mirroring the NSE client, HTML parse mode, 4000-char chunking
+  on line boundaries. Never raises; returns False and logs.
+- Three messages: monthly order sheet (expiry evening), daily note
+  (every trading evening), failure alert (on exception).
+- Creds in a gitignored `.env`; real env vars take precedence.
+- **Still EOD-only.** A stop that fills at 14:00 is invisible until the
+  next evening's run. Not fixable without broker integration.
+
+## Corporate Action Classifier (BUILT — 01-Aug-2026)
+
+Replaces the blind assumption in `strategy.split_adjust` that any ratio
+breach is a split. Gemini is given the price move plus every NSE filing
+in a ±10/+3-day window and asked which combination explains it. There is
+deliberately **no deterministic parser** — the hard cases are selection
+and composition, not extraction.
+
+- Waterfall `gemini-3.6-flash → 3.5-flash → 3.5-flash-lite`, extended
+  thinking on all three, strict `responseSchema`, disk-cached by prompt
+  hash so re-runs are free and byte-identical.
+- **Scored 20/20** on the labelled set in `tests/labelled_breaches.py`,
+  drawn from the real cache: SPLIT 8, BONUS 9, COMPOSITE 1, UNKNOWN 2.
+- `CORP_ACTION_UNKNOWN_POLICY` (default `"heuristic"`) decides demerger
+  handling. Neither option is correct — see KIs.
+
+## Surveillance Veto (BUILT — 01-Aug-2026)
+
+`surveillance.py` drops basket names under NSE ASM. Exclusion only,
+never promotion. Fails open. **Cannot be backtested** — NSE publishes no
+ASM history.
+
+## Ledger (BUILT — 01-Aug-2026)
+
+`data/ledger.jsonl` (one record per run) plus `data/notes/*.txt` (the
+exact message sent). Written before delivery. **Tracked in git** — it is
+history, not regenerable output. `run_strategy.py history` reads it back.
+
+## Knowledge Items — 01-Aug-2026 session
+
+- **A 40% target order cannot be placed in India.** F&O scrips carry a
+  dynamic price band of ±10% of the previous close; anything outside is
+  rejected at order entry, and when the band flexes the exchange cancels
+  orders in the old band (SEBI/HO/MRD/TPD-1/P/CIR/2024/58, NSE/FAOP/64995).
+  All 208 F&O names show `No Band` in NSE's `sec_list.csv` — that means
+  no *static* circuit, not no constraint. **The target becomes placeable
+  at roughly +27.3%** (1.40 / 1.10). The daily note says when.
+  The backtest does NOT yet model this: it fills targets on any day whose
+  high touches them. Two such fills exist in 13 months (POWERINDIA,
+  ADANIGREEN), worth ~8pp of the +31.77% accrued.
+- **The stop is modelled optimistically.** `low <= stop` books an exit AT
+  the stop, but a stop-loss is a market order on trigger. Measured over
+  80,132 stock-days: a 5% stop triggers on 2.89% of them, and **13.8% of
+  those gap through**, median −1.84%, worst −30.03%. Mean drag across all
+  triggers ≈ −0.39%.
+- **Sandbox network egress is NOT blocked** (supersedes the earlier KI).
+  Verified 01-Aug-2026 by fetching uncached 2024 bhavcopy. The stale
+  warning in `nse_client.py`'s docstring is wrong and should be deleted.
+- **NSE's homepage 403s while its APIs return 200.** Do not gate
+  `/api/corporates-corporateActions` or `/api/reportASM` on a homepage
+  cookie warm-up; it fails and buys nothing.
+- **A 404 from NSE is permanent, not transient.** It was being retried
+  3× with 2/4/8s backoff, costing 14s per market holiday. Now raised
+  immediately as `NseNoDataError` and negative-cached. Report build time
+  went from 120s+ to 17.7s.
+- **ASM barely intersects the F&O universe** — 1 of 208 on 01-Aug-2026.
+  ASM/GSM police illiquid small caps; F&O eligibility screens those out
+  by construction. The veto still fired on KALYANKJIL in the live basket,
+  so it is not useless, but its expected hit rate is very low.
+- **pandas 3.0 requires Python ≥3.11**, which the Cowork sandbox (3.10)
+  cannot satisfy. Windows runs 3.13.14 / pandas 3.0.5; `requirements.txt`
+  is pinned to that. The 24-test suite passes on both 2.3.3 and 3.0.5.
+- **Verified backtest under the current code: +31.77%** over the same 13
+  months, against +32.34% previously — a −0.57pp change. The classifier
+  barely moved the number here; its value is insurance against a future
+  genuine collapse being laundered into a clean series, not alpha.
+  t-stat 1.30, 8/13 months positive, worst −8.01%.
 
 ## Pending Tasks
 
@@ -240,13 +322,22 @@ basket run, without polling or a new pipeline.
   by `fo_mktlots.csv` for V4 but still used by `pipeline.py`.
 - Optional: scheduled task to auto-generate the basket on expiry evening.
 - Optional: remote git repo for off-machine backup (local only today).
-- **Alerts engine** (see V5/Alerts sections above): pick delivery channel
-  (Telegram vs. email), write `alerts.py`, hook into `run_strategy.py`'s
-  action list, verify NSE reachability in a fresh Cowork sandbox before
-  committing to a Cowork-scheduled-task approach over Task Scheduler.
+- **Model the ±10% price band in the backtest.** Targets currently fill
+  on any day whose high touches them, which is impossible below +27.3%.
+  Until this is done the +31.77% is overstated by an unknown amount.
+- **Windows Task Scheduler entries not yet created** — the system does
+  not run unattended until they are.
+- **Rotate the Gemini API key.** It was pasted into a chat transcript on
+  01-Aug-2026.
+- Delete the stale "sandbox blocks nseindia.com" docstring in
+  `nse_client.py` — disproven.
 - **V5 change #3**: unspecified by user as of 01-Aug-2026 — get this
   before finalizing V5's `strategy.py`/`config.py`.
-- **Commit the uncommitted work.** As of 01-Aug-2026, `config.py`,
+- ~~Commit the uncommitted work~~ — DONE 01-Aug-2026, plus a private
+  GitHub remote at `ranjankai/momentummori` (public; see below).
+- ~~Extend history~~ — PARTIAL: `data/cache` now runs from Jan-2024
+  (636 days) rather than Jan-2025. Still far short of 2018.
+- (superseded) **Commit the uncommitted work.** As of 01-Aug-2026, `config.py`,
   `pipeline.py`, `run_backtest.py`, `scoring.py`, both test files, and
   `CONTEXT.md` are modified but uncommitted; `strategy.py`,
   `run_strategy.py`, `fo_mktlots.csv`, `config/sectors.csv`, and several

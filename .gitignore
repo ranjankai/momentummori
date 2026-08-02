@@ -26,3 +26,7 @@ data/signals_cache/
 
 # Personal position data -- your real fill prices
 data/actual_fills.json
+
+# Word lock files and generated docs
+~$*
+*.docx

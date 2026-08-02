@@ -2,14 +2,15 @@
 NSE bhavcopy client: downloads and parses NSE cash-market (CM) and
 derivatives (F&O) bhavcopy files, with retries, disk caching and logging.
 
-NOTE (unverified): this sandbox's network is allowlisted and blocks
-nseindia.com, so the live download path below has NOT been exercised
-against a real NSE response in this session. The parsing logic has been
-verified against synthetic CSVs matching NSE's documented UDiFF bhavcopy
-schema (see tests/test_scoring.py). Run scripts/smoke_test_live.py on a
-machine with normal internet access to confirm the URL template and
-column names are still current before relying on this for real trading
-decisions.
+VERIFIED LIVE (02-Aug-2026): the download path works. 246 days of 2024
+CM bhavcopy were fetched through it in one run, and every uncached date
+tested returned real data. An earlier version of this docstring claimed
+the network blocked nseindia.com -- that was wrong and is now removed.
+
+A 404 means NSE published nothing for that date, which is permanent, not
+transient. It is raised immediately as NseNoDataError and recorded with a
+.nodata marker so the same holiday is never re-requested. Retrying 404s
+cost 14 seconds per market holiday and made the nightly run unschedulable.
 """
 
 import io

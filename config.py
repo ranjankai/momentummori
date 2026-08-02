@@ -1,11 +1,13 @@
 """
 Configuration for the Momentum Tracker.
 
-UNIVERSE_FILE: CSV of F&O-eligible symbols (one column: `symbol`).
-A starter list is seeded in config/universe.csv. NSE revises the F&O
-list quarterly — replace that file with the current list from
-https://www.nseindia.com/content/fo/fo_mktlots.csv when you have
-network access, or point UNIVERSE_FILE elsewhere.
+The live strategy is V4 (strategy.py, run_strategy.py). It draws its
+universe from FO_MKTLOTS_FILE -- NSE's F&O eligibility list -- and scores
+on V4_WEIGHTS.
+
+Everything under "LEGACY" below belongs to the superseded 4-signal
+pipeline now in legacy/. It is read by nothing on the live path and is
+kept only so those files still import. Delete both together.
 """
 
 import os
@@ -55,21 +57,18 @@ REQUEST_TIMEOUT_SECONDS = 20
 MAX_RETRIES = 3
 RETRY_BACKOFF_BASE_SECONDS = 2  # 2s, 4s, 8s
 
-# Strategy parameters (mirrors the Altcase Momentum Leaders rules)
+# --- LIVE: shared by V4 -----------------------------------------------
 PORTFOLIO_SIZE = 10
 MAX_SINGLE_STOCK_WEIGHT_PCT = 10
-MAX_SECTOR_WEIGHT_PCT = 30       # deck's disclosed cap -- enforced in scoring.rank_universe
-ROLLOVER_LOOKBACK_DAYS = 5       # trading days before expiry treated as "rollover window"
-PRICE_MOMENTUM_LOOKBACK_DAYS = 63  # ~3 trading months
-VOLUME_TREND_LOOKBACK_DAYS = 20
-VOLATILITY_LOOKBACK_DAYS = 63    # same window as price momentum, for the volatility signal
+MAX_SECTOR_WEIGHT_PCT = 30       # max 3 of 10 in one sector
 
-# Composite score weights (must sum to 1.0). low_volatility is a 5th
-# signal added after backtesting showed this tool's worst drawdown
-# months were both sector-concentrated AND running hotter (daily
-# volatility) than the universe median -- exactly what the deck's
-# disclosed "volatility-aware ranking" claims to filter for. Lower
-# realized volatility scores higher here (see scoring.py).
+# --- LEGACY: read only by legacy/ (the superseded 4-signal pipeline) ---
+# Note SIGNAL_WEIGHTS scores LOW volatility highest, the opposite of the
+# live V4 model. Do not confuse the two.
+ROLLOVER_LOOKBACK_DAYS = 5
+PRICE_MOMENTUM_LOOKBACK_DAYS = 63
+VOLUME_TREND_LOOKBACK_DAYS = 20
+VOLATILITY_LOOKBACK_DAYS = 63
 SIGNAL_WEIGHTS = {
     "rollover_pct": 0.30,
     "cost_of_carry": 0.20,
@@ -378,7 +377,16 @@ LLM_TARGET_MAX_PCT = 40.0
 # upside does not clear this, the capital is better left in cash than
 # put at equity risk for nothing.
 RISK_FREE_ANNUAL_PCT = 8.0
-LLM_TARGET_MIN_PCT = 1.0         # rounded up from 8/12 = 0.67
+
+# DEPLOY hurdle: if no candidate can plausibly gain this much over the
+# holding period, the slot stays in cash. Rounded up from 8/12 = 0.67.
+LLM_DEPLOY_MIN_PCT = 1.0
+
+# TARGET floor: a separate number. A target must be far enough above
+# entry to be worth placing at all -- a 1% target books out on the first
+# day's noise and turns a momentum strategy into a scalping one. This is
+# the floor on the LEVEL, not on whether to deploy.
+LLM_TARGET_MIN_PCT = 8.0
 
 # Cash sitting in an unfilled slot is a deliberate position, so it earns
 # the risk-free rate pro-rata rather than nothing. Without this an empty
@@ -409,10 +417,9 @@ RS_WEIGHTS = {
     "volatility": 0.20,   # keeps the volatility tilt that the backtest found
 }
 
-# How many names the LLM chooses between. Small enough that every option
-# is already defensible -- the model picks within a good set, it does not
-# range over the whole universe.
-CANDIDATE_SHORTLIST_N = 12
+# (CANDIDATE_SHORTLIST_N removed 02-Aug-2026: pre-filtering the universe
+# by RS reimposed the single-score cutoff the LLM layer exists to avoid.
+# The model now sees every eligible name.)
 
 
 # ---------------------------------------------------------------------------

@@ -84,6 +84,103 @@ EXIT_SCHEMA = {
 }
 
 
+_EXIT_PROMPT = """\
+You are an equity analyst reviewing ONE open position at the end of a
+trading day. It sits in a ten-stock Indian momentum portfolio. It was
+bought because it was among the strongest names in the universe. Your
+only question:
+
+  Is this stock STILL in momentum, or has it lost it?
+
+If it has lost momentum, it is sold at tomorrow's open and the capital
+goes elsewhere. If it is still running, it is left alone.
+
+This is not a stop-loss decision. A 5% stop already sits at the broker
+and fires by itself. You are not being asked whether the position is
+losing money -- a position can be up and still be finished, and can be
+down and still be intact. Judge the trend, not the P&L.
+
+Every number below was computed from exchange data at today's close. You
+have no chart and no knowledge of this company, its results or its news.
+If something is not in these numbers, you do not know it.
+
+POSITION
+  days held: {days_held}
+  entry price: {entry}
+  stop price: {stop}
+
+READINGS
+{features}
+
+WHAT LOSING MOMENTUM LOOKS LIKE
+  - Rank sliding through the universe over successive weeks. A name that
+    was top-10 and is now mid-pack has lost its relative edge even if the
+    price is flat.
+  - Price losing its moving averages in order -- through the 20, then the
+    50 -- especially with the 50-day slope turning down.
+  - Breaking the 20-day Donchian low, or giving back most of the move
+    that got it selected.
+  - Volatility expanding while the price falls: distribution, not
+    accumulation. Check the up/down volume ratio.
+  - Fewer up days than down days over the last 21 sessions.
+
+WHAT IS NOT LOSING MOMENTUM
+  - An ordinary pullback to a rising 20 or 50-day average.
+  - One bad day inside an intact uptrend.
+  - Being below the entry price. That is what the stop is for.
+  - High volatility on its own. This strategy deliberately holds stocks
+    that move.
+
+Be decisive. Selling a stock that was merely resting costs real money in
+round-trip costs and forfeits the recovery. Holding a broken one costs
+more. `exit_reason` must name the readings that decided it.
+`inputs_used` must list the exact field names you relied on.
+"""
+
+
+def exit_judgement(symbol: str, feat: dict, days_held: int,
+                   entry: float, stop: float) -> dict:
+    """
+    Daily off-momentum call on one open position.
+
+    Returns {"exit_now": bool, ...}. On failure or when disabled returns
+    exit_now False -- a missing judgement never sells a position.
+    """
+    def hold(reason):
+        return {"symbol": symbol, "exit_now": False, "source": "none",
+                "exit_reason": reason, "confidence": None, "model": None}
+
+    if not config.LLM_EXIT_ENABLED:
+        return hold("exit judgement disabled")
+    if not feat:
+        return hold("insufficient price history")
+
+    prompt = _EXIT_PROMPT.format(
+        days_held=days_held, entry=f"{entry:,.2f}", stop=f"{stop:,.2f}",
+        features=_fmt_features(feat))
+    ans = llm.generate_json(prompt, EXIT_SCHEMA)
+    if ans is None:
+        return hold("every model tier failed")
+
+    used = [u for u in (ans.get("inputs_used") or []) if isinstance(u, str)]
+    unknown = [u for u in used if u not in feat]
+    if not used or unknown:
+        return hold(f"ungrounded inputs_used {unknown or 'empty'}")
+
+    out = {
+        "symbol": symbol,
+        "exit_now": bool(ans.get("exit_now")),
+        "source": "llm",
+        "exit_reason": ans.get("exit_reason", ""),
+        "confidence": ans.get("confidence"),
+        "inputs_used": used,
+        "model": ans.get("_model"),
+    }
+    if out["exit_now"]:
+        logger.info("%s: OFF-MOMENTUM exit -- %s", symbol, out["exit_reason"][:120])
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Features -- everything the model is allowed to know
 # ---------------------------------------------------------------------------
@@ -460,10 +557,10 @@ A position exited mid-month and one slot of a ten-stock Indian equity
 portfolio is now empty. It must be refilled at tomorrow's open. Choose
 which stock to buy.
 
-You are given a shortlist that has ALREADY been screened: every name
-below is eligible, liquid, passes the sector cap, and ranks near the top
-on price-based relative strength. Your job is to pick the best of a good
-set, not to find a bargain.
+Below is the FULL list of eligible names -- everything in the universe
+that is not already held, passes the sector cap, is not banned by the
+re-entry rule and is not under exchange surveillance. It is not
+pre-filtered by any score. Judge it yourself.
 
 All figures are computed from today's exchange close. You have no chart
 and no other knowledge of these companies. If something is not in the
@@ -484,7 +581,12 @@ HOW TO WEIGH IT
   - The position carries a 5% stop from entry. A name that routinely
     swings more than that in a day will likely be stopped out on noise.
 
-Return the SYMBOL exactly as written in the shortlist. `rationale` should
+If NOTHING here can plausibly gain at least {min_pct}% over the next ~21
+sessions, return symbol "CASH". Leaving the slot in cash is a valid and
+sometimes correct answer -- capital that cannot beat the risk-free rate
+should not take equity risk.
+
+Return the SYMBOL exactly as written in the list. `rationale` should
 say in one or two sentences why this one over the others. `inputs_used`
 must list the exact field names you relied on.
 """
@@ -530,7 +632,7 @@ def choose_candidate(eligible: list, rs: pd.DataFrame) -> dict:
     if not config.LLM_CANDIDATE_ENABLED:
         return mechanical("LLM candidate selection disabled; top RS name")
 
-    shortlist = eligible[:config.CANDIDATE_SHORTLIST_N]
+    shortlist = eligible          # full universe; no score pre-filter
     lines = []
     for sym in shortlist:
         if sym not in rs.index:
@@ -543,12 +645,19 @@ def choose_candidate(eligible: list, rs: pd.DataFrame) -> dict:
         return mechanical("no readings available for the shortlist")
 
     ans = llm.generate_json(
-        _CANDIDATE_PROMPT.format(candidates="\n".join(lines)),
+        _CANDIDATE_PROMPT.format(candidates="\n".join(lines),
+                                 min_pct=config.LLM_DEPLOY_MIN_PCT),
         CANDIDATE_SCHEMA)
     if ans is None:
         return mechanical("every model tier failed; top RS name")
 
     pick = str(ans.get("symbol", "")).strip().upper()
+    if pick == "CASH":
+        logger.info("Model chose CASH -- nothing clears the %.2f%% hurdle",
+                    config.LLM_DEPLOY_MIN_PCT)
+        return {"symbol": None, "source": "llm_cash",
+                "rationale": ans.get("rationale", ""),
+                "confidence": ans.get("confidence"), "model": ans.get("_model")}
     if pick not in {s.upper() for s in shortlist}:
         logger.warning("Model returned %r which is not on the shortlist; "
                        "falling back to top RS name %s", pick, top)

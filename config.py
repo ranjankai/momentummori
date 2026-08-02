@@ -372,7 +372,18 @@ LLM_EXIT_ENABLED = False         # turn on separately, after targets
 # higher; anything above is clamped. V4_TARGET_PCT remains the fallback
 # when the layer is off or the response fails validation.
 LLM_TARGET_MAX_PCT = 40.0
-LLM_TARGET_MIN_PCT = 8.0         # below this a target is not worth placing
+
+# Deployment hurdle: the risk-free rate, pro-rated over one holding
+# period. 8% annual / 12 = 0.67% a month. If the plausible 21-session
+# upside does not clear this, the capital is better left in cash than
+# put at equity risk for nothing.
+RISK_FREE_ANNUAL_PCT = 8.0
+LLM_TARGET_MIN_PCT = round(RISK_FREE_ANNUAL_PCT / 12, 2)   # 0.67
+
+# Cash sitting in an unfilled slot is a deliberate position, so it earns
+# the risk-free rate pro-rata rather than nothing. Without this an empty
+# slot drags the monthly return to 0% and understates what you did.
+CASH_ACCRUES_RISK_FREE = True
 
 LLM_JUDGMENT_FILE = os.path.join(DATA_DIR, "llm_targets.json")
 

@@ -422,6 +422,22 @@ def build_entry_sheet(expiry: date, session=None) -> dict:
     stop = config.V4_STOP_LOSS_PCT / 100.0
     target = config.V4_TARGET_PCT / 100.0
 
+    # What are we holding right now? Reconstruct the OUTGOING month (the
+    # one ending at this expiry) so the sheet can tell HOLD from SELL
+    # from BUY. Without this the sheet lists all ten names as buys,
+    # including ones already owned, and never says what to exit.
+    current = {}
+    try:
+        outgoing = build(expiry, session=session)
+        current = {h.symbol: h for h in outgoing.holdings}
+    except Exception as exc:
+        logger.warning("Could not reconstruct the outgoing month (%s); "
+                       "treating every name as a fresh buy", exc)
+
+    new_set = set(kept)
+    to_hold = [s for s in kept if s in current]
+    to_sell = [s for s in current if s not in new_set]
+
     rows = []
     for sym in kept:
         close = float(signals.at[sym, "close"]) if sym in signals.index else None
@@ -435,23 +451,54 @@ def build_entry_sheet(expiry: date, session=None) -> dict:
             "entry_lo": lo, "entry_hi": hi,
             "sl_lo": lo * (1 - stop), "sl_hi": hi * (1 - stop),
             "tgt_lo": lo * (1 + target), "tgt_hi": hi * (1 + target),
+            "action": "HOLD" if sym in current else "BUY",
         })
+
+    sells = []
+    for sym in to_sell:
+        h = current[sym]
+        sells.append({"symbol": sym, "last": h.last, "pnl_pct": h.pnl_pct})
+
     return {"expiry": expiry, "rows": rows, "dropped": dropped,
-            "veto_ran": veto_ran}
+            "veto_ran": veto_ran, "sells": sells, "holds": to_hold,
+            "had_prior_book": bool(current)}
 
 
 def render_entry_sheet(sheet: dict) -> str:
     from alerts import esc
     rows = sheet["rows"]
     weight = 100.0 / config.PORTFOLIO_SIZE
+    sells = sheet.get("sells") or []
+    holds = sheet.get("holds") or []
+    buys = [r for r in rows if r.get("action") != "HOLD"]
+
     L = [f"<b>Portfolio for this month</b>",
          f"<i>Basket from the {sheet['expiry']:%d-%m-%y} close — "
          f"place at the next open</i>",
-         "",
-         f"<b>Invest {weight:.0f}% in each of the following:</b>",
          ""]
-    for i, r in enumerate(rows):
-        L.append(f"<b>{i + 1}. {esc(r['symbol'])}</b>")
+
+    # Exits first: the money has to come out before it can go back in.
+    if sells:
+        L.append("<b>SELL ORDERS - AT MARKET ON OPEN</b>")
+        for i, s in enumerate(sells, 1):
+            pnl = ""
+            if s.get("pnl_pct") is not None:
+                sign = "+" if s["pnl_pct"] >= 0 else ""
+                pnl = f"  ({sign}{s['pnl_pct']:.1f}%)"
+            L.append(f"{i}. {esc(s['symbol'])} - dropped out of the basket{pnl}")
+        L.append("")
+
+    if holds:
+        L.append("<b>CONTINUE TO HOLD - no order needed</b>")
+        for i, sym in enumerate(holds, 1):
+            L.append(f"{i}. {esc(sym)}")
+        L.append("")
+
+    if buys:
+        L.append(f"<b>BUY ORDERS - invest {weight:.0f}% in each</b>")
+        L.append("")
+    for i, r in enumerate(buys, 1):
+        L.append(f"<b>{i}. {esc(r['symbol'])}</b>")
         L.append(f"    Enter at market: {_fmt_money(r['entry_lo'])} – "
                  f"{_fmt_money(r['entry_hi'])}")
         L.append(f"    SL @{config.V4_STOP_LOSS_PCT:.0f}%: "
@@ -459,6 +506,11 @@ def render_entry_sheet(sheet: dict) -> str:
         L.append(f"    Book at +{config.V4_TARGET_PCT:.0f}%: "
                  f"{_fmt_money(r['tgt_lo'])} – {_fmt_money(r['tgt_hi'])} "
                  f"<i>(do not place yet)</i>")
+        L.append("")
+
+    if not sheet.get("had_prior_book", True):
+        L.append("<i>No prior positions found — treating every name above "
+                 "as a fresh buy.</i>")
         L.append("")
 
     L.append(f"<i>Place the SL as a resting order once the buy fills — it is "

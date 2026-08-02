@@ -16,7 +16,7 @@ WHEN EACH RUNS
           carries into a new month, because the cost basis resets.
           NEVER recomputed intra-month -- a target that moves is not a
           target.
-  EXIT    every day, mid-month only. Purely additive to the 5% stop: it
+  EXIT    every day, mid-month only. Purely additive to the stop-loss: it
           can bring a position out early and can do nothing else.
 
 Expiry day is mechanical. The composite rank decides what is held and
@@ -95,7 +95,7 @@ only question:
 If it has lost momentum, it is sold at tomorrow's open and the capital
 goes elsewhere. If it is still running, it is left alone.
 
-This is not a stop-loss decision. A 5% stop already sits at the broker
+This is not a stop-loss decision. A {stop_pct:.0f}% stop already sits at the broker
 and fires by itself. You are not being asked whether the position is
 losing money -- a position can be up and still be finished, and can be
 down and still be intact. Judge the trend, not the P&L.
@@ -157,7 +157,7 @@ def exit_judgement(symbol: str, feat: dict, days_held: int,
 
     prompt = _EXIT_PROMPT.format(
         days_held=days_held, entry=f"{entry:,.2f}", stop=f"{stop:,.2f}",
-        features=_fmt_features(feat))
+        stop_pct=config.V4_STOP_LOSS_PCT, features=_fmt_features(feat))
     ans = llm.generate_json(prompt, EXIT_SCHEMA)
     if ans is None:
         return hold("every model tier failed")
@@ -578,8 +578,8 @@ HOW TO WEIGH IT
     volatility is a positive, not a risk to be avoided.
   - A deep recent drawdown argues against, even where returns look good
     -- it usually means the move has already broken once.
-  - The position carries a 5% stop from entry. A name that routinely
-    swings more than that in a day will likely be stopped out on noise.
+  - Positions carry a {stop_pct:.0f}% stop from entry. A name that routinely
+    swings more than that in a day will be stopped out on noise.
 
 If NOTHING here can plausibly gain at least {min_pct}% over the next ~21
 sessions, return symbol "CASH". Leaving the slot in cash is a valid and
@@ -646,7 +646,8 @@ def choose_candidate(eligible: list, rs: pd.DataFrame) -> dict:
 
     ans = llm.generate_json(
         _CANDIDATE_PROMPT.format(candidates="\n".join(lines),
-                                 min_pct=config.LLM_DEPLOY_MIN_PCT),
+                                 min_pct=config.LLM_DEPLOY_MIN_PCT,
+                                 stop_pct=config.V4_STOP_LOSS_PCT),
         CANDIDATE_SCHEMA)
     if ans is None:
         return mechanical("every model tier failed; top RS name")

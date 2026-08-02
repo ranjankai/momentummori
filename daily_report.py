@@ -137,9 +137,26 @@ def build(as_of: date, session=None) -> Report:
     # The re-marking that carry_forward does to carry_out does not reach
     # us: simulate_month snapshots open_positions with their ORIGINAL
     # cost bases before that branch runs.
+    # Mid-month replacements are chosen on CASH data recomputed today,
+    # never on the frozen expiry composite -- rollover's rank ordering is
+    # static for three weeks between expiries. The LLM picks from the full
+    # eligible list; None means nothing cleared the deployment hurdle and
+    # the slot stays in cash.
+    candidate_fn = None
+    if config.LLM_CANDIDATE_ENABLED:
+        import llm_judgment
+        rs = llm_judgment.rs_rank(as_of, symbols, merged)
+
+        def candidate_fn(eligible, _rs=rs):
+            ordered = [s for s in _rs.index if s in set(eligible)]
+            if not ordered:
+                return None
+            return llm_judgment.choose_candidate(ordered, _rs).get("symbol")
+
     res = strategy.simulate_month(
         list(full.index), merged, days, sectors,
-        basket_symbols=basket_symbols, carry_forward=True)
+        basket_symbols=basket_symbols, carry_forward=True,
+        candidate_fn=candidate_fn)
     holdings, exits, to_buy, mtd = (res.open_positions, res.exits,
                                     res.to_buy, res.return_pct)
 

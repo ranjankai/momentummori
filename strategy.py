@@ -495,7 +495,8 @@ def simulate_month(ranked_order, price_by_date, hold_dates, sector_map,
                    reentry_policy=None, top_n=None,
                    stop_pct=None, target_pct=None,
                    carry_in: dict = None, basket_symbols=None,
-                   carry_forward: bool = None) -> MonthResult:
+                   carry_forward: bool = None,
+                   candidate_fn=None) -> MonthResult:
     """
     Day-by-day simulation of `top_n` equally weighted slots.
 
@@ -543,6 +544,32 @@ def simulate_month(ranked_order, price_by_date, hold_dates, sector_map,
 
     def sector_of(sym):
         return (sector_map or {}).get(sym, f"Unclassified:{sym}")
+
+    def next_candidate(queued):
+        """
+        Pick the replacement for a freed slot.
+
+        `candidate_fn(eligible)` -> symbol or None lets the live path
+        substitute a daily, cash-only judgement for the frozen expiry
+        ordering. The BACKTEST deliberately passes nothing: a model whose
+        training data covers the test period cannot be backtested, so the
+        historical path stays mechanical and reproducible.
+
+        Returning None is legitimate -- it means nothing cleared the
+        deployment hurdle and the slot stays in cash.
+        """
+        eligible = [c for c in ranked_order
+                    if available(c) and c not in queued]
+        if not eligible:
+            return None
+        if candidate_fn is None:
+            return eligible[0]
+        try:
+            return candidate_fn(eligible)
+        except Exception as exc:
+            logger.error("candidate_fn failed (%s); using top-ranked %s",
+                         exc, eligible[0])
+            return eligible[0]
 
     def available(sym):
         if sym in banned:
@@ -611,10 +638,9 @@ def simulate_month(ranked_order, price_by_date, hold_dates, sector_map,
             exits.append(Exit(sym, pos.entry, float(px_open), "ROLLOVER", first))
             if policy != "always":
                 banned.add(sym)
-            for cand in ranked_order:
-                if available(cand) and cand not in [s for _, s in pending]:
-                    pending.append((use_slot, cand))
-                    break
+            cand = next_candidate([s for _, s in pending])
+            if cand:
+                pending.append((use_slot, cand))
 
     # Fill whatever slots are still empty, same as a no-carry month.
     for sym in ranked_order:
@@ -658,10 +684,9 @@ def simulate_month(ranked_order, price_by_date, hold_dates, sector_map,
             held[slot_id] = None
 
             if i < len(hold_dates) - 1:
-                for cand in ranked_order:
-                    if available(cand) and cand not in [s for _, s in pending]:
-                        pending.append((slot_id, cand))
-                        break
+                cand = next_candidate([s for _, s in pending])
+                if cand:
+                    pending.append((slot_id, cand))
 
     final = hold_dates[-1]
     frame = price_by_date.get(final)

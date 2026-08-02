@@ -118,7 +118,15 @@ V4_HISTORY_DAYS = 260        # trading days of price history pulled per run
 # Exit rules. The stop and target are resting broker orders, so they may
 # trigger intra-day. Every other decision (entry, redeployment) happens
 # once a day at the 9am open -- no discretionary intra-day trading.
-V4_STOP_LOSS_PCT = 5.0
+# Stop widened 5% -> 10% on 02-Aug-2026. The 5% stop fired 102 times in
+# 13 backtested months against 2 target hits, and the measured evidence
+# said it was too tight for this universe: KALYANKJIL stopped out at -5%
+# in the Jun-2026 cycle and was +47.6% three weeks later. A strategy that
+# deliberately selects the most volatile names in the market cannot use a
+# stop inside their normal daily range.
+#
+# NOT BACKTESTED at 10%. The +31.77% in CONTEXT.md was produced at 5%.
+V4_STOP_LOSS_PCT = 10.0
 V4_TARGET_PCT = 40.0
 
 # Redeployment: when a position exits mid-month its slot is refilled at the
@@ -373,8 +381,8 @@ ACTUAL_FILLS_FILE = os.path.join(DATA_DIR, "actual_fills.json")
 # a chart and never asked to recall a level.
 # ---------------------------------------------------------------------------
 
-LLM_TARGET_ENABLED = False       # turn on once you have seen targets behave
-LLM_EXIT_ENABLED = False         # turn on separately, after targets
+LLM_TARGET_ENABLED = True
+LLM_EXIT_ENABLED = True
 
 # HARD CEILING. The model may propose any target up to this and no
 # higher; anything above is clamped. V4_TARGET_PCT remains the fallback
@@ -415,7 +423,7 @@ LLM_JUDGMENT_FILE = os.path.join(DATA_DIR, "llm_targets.json")
 #
 # So mid-month candidate selection uses CASH DATA ONLY: price-based
 # relative strength, recomputed daily. Derivatives are not consulted.
-LLM_CANDIDATE_ENABLED = False
+LLM_CANDIDATE_ENABLED = True
 
 # Mechanical price-based RS, used to build the shortlist the LLM chooses
 # from AND as the fallback when the LLM is off or fails. Weights sum to 1.

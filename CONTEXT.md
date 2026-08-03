@@ -617,6 +617,119 @@ probably still valid (both arms shared the construction) but the LEVELS
 are not comparable to the table above. `tools_run13.py` is the only
 13-month result produced by the production code path -- use it.
 
+## Session 03-Aug-2026 -- exit rules and selection rules, both rejected
+
+### Accounting convention FIXED
+
+Backtests are **fresh-start and additive**. Rs100 is deployed on the first
+session after each expiry and fully closed at the first session after the
+next expiry. Monthly returns are SUMMED, never compounded, because
+investors enter and exit at will and each month's number must belong to
+whoever was invested that month.
+
+Carry-forward is an **operational detail for the Telegram messages only**
+-- it decides whether a held name generates a SELL+BUY pair or nothing.
+It is NOT a backtest assumption. Earlier tables that leaned on chained
+carry-forward are superseded by the matrix below.
+
+### The 2x2 matrix -- 13 cycles, fresh start, additive (`tools_matrix.py`)
+
+| entry | exit | sum | mean | sd | worst | best | pos | t |
+|---|---|---|---|---|---|---|---|---|
+| **V4** | **V4** | **+34.02%** | 2.62% | 7.47 | -6.18% | 19.84% | 8/13 | 1.26 |
+| V4 | ATR SOP | +18.66% | 1.44% | 7.92 | -6.09% | 21.89% | 7/13 | 0.65 |
+| v1.1 | V4 | +9.09% | 0.70% | 3.79 | -5.64% | 5.80% | 8/13 | 0.66 |
+| v1.1 | ATR SOP | +0.33% | 0.03% | 3.49 | -4.53% | 5.19% | 6/13 | 0.03 |
+
+Attribution: swapping the exit costs -15.36pp, swapping the entry costs
+-24.93pp, swapping both costs -33.69pp. **Nothing beat the live config.**
+
+### Why the ATR conviction SOP failed
+
+Stops and targets as ATR20 multiples by conviction rank (1-3: 2.5x/6x,
+4-7: 2.0x/5x, 8-10: 1.5x/4x); the target only promotes INITIAL -> WINNER,
+then a ratchet stop trails the high and never widens.
+
+The promotion gate never opens. Median target distance is **18.05%** in a
+~34-day window, so only **21 of 130 positions** ever reached WINNER. The
+trailing stop -- the entire point of the design -- fired 17 times in 130.
+Adding carry-forward made it WORSE (+16.99% vs +18.66%): a carried
+position keeps its original frozen entry, so after a bad month the target
+sits even further overhead.
+
+Conviction buckets showed no monotonic payoff: Top 3 mean -0.19%,
+Middle 4 +4.07%, Bottom 3 -0.45%. Rank 1-3 did no better than rank 8-10,
+so the tiered ATR multiples are not earning anything.
+
+### Why the v1.1 selection rule failed
+
+Equal-weight blend of a derivative block (roll surprise, carry, OI change,
+futures volume), a volatility block that rewards CALM, and a trend
+composite; mandatory close > 20 DMA and > 50 DMA; max 3 per sector; top 10
+of a top-50 candidate pool.
+
+Two causes, both structural:
+
+1. **The volatility term is inverted relative to what works.** V4 scores
+   HIGH volatility higher; v1.1 rewards calm. The two biggest months --
+   Jan-26 (+13.70%) and Mar-26 (+19.84%) -- returned +0.83% and +5.80%
+   under v1.1. sd halves (7.47 -> 3.79) and so does the return: it cuts
+   the right tail, not the risk.
+2. **The DMA gates bind hardest when they cost most.** Mar-2026 breadth
+   19.4% left only **7 names** in the whole F&O universe above both DMAs,
+   so v1.1 produced a 7-stock portfolio. Jul-25 and Aug-25 ran at 42 and
+   41. The filter empties the pool right after a crash, which is when the
+   rebound happens.
+
+### Altcase overlap -- v1.1 matches better and earns less
+
+Across 12 months and 115 mapped names: **v1.1 overlap 24 (20.9%)**,
+**V4 overlap 8 (7.0%)**. v1.1 triples the name-matching and returns
++0.33% against V4's +34.02%.
+
+This is the cleanest confirmation yet that **their edge is entry price,
+not stock choice** (27/29 entries below the next-day open, median -2.10%).
+Getting closer to their basket does not get you closer to their returns.
+
+### Mar-2026 hand-picked basket, both exit rules (`tools_cycle_compare.py`)
+
+PREMIERENE, WAAREEENER, MCX, NATIONALUM, COALINDIA, DMART, ONGC,
+AUROPHARMA, ADANIPOWER, PERSISTENT -- entered 31-Mar open, closed 29-Apr
+open. **V4 +11.33%, ATR SOP +9.92%.**
+
+The 10% regime stop held every position to rollover; nothing stopped out.
+ADANIPOWER was the only name to touch the 40% target (24-Apr, +38.99%)
+and the only SOP promotion to WINNER, trailed out at +38.45% -- 0.54pp
+worse than simply selling at the target. The gap came from COALINDIA and
+AUROPHARMA, whose tighter ATR stops threw them out before they recovered.
+
+Note: 7 of these 10 are exactly what v1.1 selected that month; the other
+three (MCX, ADANIPOWER, PERSISTENT) are the Step-8 fills, and they roughly
+doubled the month.
+
+### Tooling added 03-Aug-2026
+
+- `tools_enrich_features.py` -- adds a 34-column `0 Master` sheet plus
+  `8 Universe Filters` and `9 Notes` to any feature workbook: 6M rollover
+  baseline, OI build-up classification, ASM/GSM, T2T, date-exact F&O ban,
+  NIFTY 50/100/200 membership.
+- `tools_matrix.py` -- the 2x2 entry/exit backtest above.
+- `tools_sop13.py`, `tools_sop_run.py`, `tools_cycle_compare.py` -- ATR
+  SOP walk-forward and single-cycle comparison.
+
+DATA GAPS, unresolved: **Market Cap and Free Float Market Cap have no
+accessible source.** NSE's `quote-equity` API (which carries `issuedSize`)
+returns 403 and the archive weightage files 404. Columns ship empty.
+**ASM/GSM and NIFTY membership are CURRENT snapshots**, not archived per
+date, so applying them historically leaks look-ahead -- they are NOT used
+in the backtest. The F&O ban list IS date-exact and IS applied. T2T is
+structurally impossible inside F&O, so that filter is a no-op.
+
+CAUTION: `tools_cycle_compare.py` originally loaded 90 days of history,
+which made `market_breadth` return `nan` and silently fall back to the
+5% stop. Any helper calling `market_breadth` or `resolve_stop_pct` must
+load the FULL history window -- the 200-DMA needs 200 sessions.
+
 ## Pending Tasks
 
 - ~~Revert the losing config~~ DONE 02-Aug-2026.
@@ -630,6 +743,8 @@ are not comparable to the table above. `tools_run13.py` is the only
   sector-first were all rejected using the flawed `sim()` helper. The
   rankings are probably right but none was measured against the true
   baseline.
+- ~~Test the ATR conviction SOP~~ REJECTED 03-Aug-2026, -15.36pp.
+- ~~Test the v1.1 selection rule~~ REJECTED 03-Aug-2026, -24.93pp.
 - **Test limit-order entry.** Place buys ~2% below the expiry close
   instead of at the next open, and measure fill rate and return over the
   five cycles. This is the one mechanism with direct evidence behind it

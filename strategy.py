@@ -288,6 +288,11 @@ def adjust_holding_window(price_by_date, hold_dates, symbols=None,
     cols = ("open_price", "high_price", "low_price", "close_price")
     for d in touched:
         frame = out[d].copy()
+        # An integer price column rejects a scaled float in-place; pandas
+        # currently warns and will raise in a future version.
+        for col in cols:
+            if col in frame.columns and frame[col].dtype.kind in "iu":
+                frame[col] = frame[col].astype(float)
         for sym, per_date in factors.items():
             f = per_date.get(d)
             if not f or sym not in frame.index:

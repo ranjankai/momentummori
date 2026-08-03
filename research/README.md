@@ -1,15 +1,28 @@
-# research/ — NOT PRODUCTION. Do not quote numbers from these files.
+# research/ — use `harness.py`. Never fork the walk loop.
 
-Every script here **reimplements** the position walk instead of calling
-`strategy.simulate_month`. That is the same defect that produced the
-`sim()` helper's bogus "live V4 = Rs115.90" on 02-Aug-2026: both arms of a
-comparison share the flaw, so the *ranking* usually survives, but the
-*level* is not comparable to anything the production engine produces.
+## What happened, and what was deleted
 
-Concretely, on 03-Aug-2026 these files were used to produce a headline of
-**+39.57% over 13 cycles**. That number is not a production result and
-must not be quoted. The production path is `tools_run13.py` in the repo
-root, which calls `strategy.simulate_month` directly.
+Seven scripts here **reimplemented** the position walk instead of calling
+`strategy.simulate_month`: `tools_matrix`, `tools_sop13`, `tools_sop_run`,
+`tools_cycle_compare`, `tools_stopsweep`, `tools_derisk` and
+`tools_selection_test`. Same defect that produced the `sim()` helper's
+bogus "live V4 = Rs115.90" on 02-Aug-2026 — both arms of a comparison
+share the flaw, so the *ranking* usually survives but the *level* is
+meaningless.
+
+They produced a headline of **+39.57% over 13 cycles**, which was never a
+production result. **All seven were deleted on 03-Aug-2026** and replaced
+by `harness.py`, which delegates every walk to `strategy.simulate_month`.
+
+The production 13-cycle number is **+36.87%** (`tools_run13.py`, repo
+root, carry-forward chained). `harness.py` runs the fresh-start additive
+convention instead, which is the agreed reporting basis.
+
+## Rule
+
+New backtests call `harness.run_cycle` or `harness.walk_forward`. If
+`simulate_month` lacks a parameter you need, **add the parameter** — do
+not copy the loop.
 
 ## Two bugs were found and fixed in `strategy.py` AFTER most of these ran
 
@@ -22,9 +35,9 @@ root, which calls `strategy.simulate_month` directly.
    closed 3343.80 on 06-07-2026 and opened 3080.00 against a 3120.75 stop
    — a -6.24% fill, not -5.00%.
 
-`research/tools_matrix.py` and `research/tools_stopsweep.py` carry their
-own private copies of these fixes. The rest do not, so their numbers are
-wrong in both directions.
+Both fixes now live in `strategy.py` and are covered by
+`tests/test_execution.py`, so anything routed through `harness.py` gets
+them automatically.
 
 ## Therefore, treat as UNVERIFIED
 

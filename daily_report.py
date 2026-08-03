@@ -122,45 +122,13 @@ def build(as_of: date, session=None) -> Report:
     symbols = strategy.load_fo_universe()
     sectors = strategy.load_sector_map()
 
-    hist = strategy.load_price_history(expiry, symbols)
-    if expiry not in hist:
-        raise strategy.StrategyError(f"No bhavcopy for governing expiry {expiry}")
-
-    import nse_client
-    import scoring
-    fo = scoring.normalize_fo_columns(nse_client.fetch_fo_bhavcopy(expiry))
-    signals = strategy.compute_signals_cached(hist, fo, expiry, symbols)
-    basket, full = strategy.rank_universe(signals, sectors)
-    basket_symbols = basket["symbol"].tolist()
-
-    # Apply the surveillance veto HERE, before the simulation, because
-    # this is the basket that was actually bought. build_entry_sheet
-    # vetoes and backfills; this function used to call apply_veto only
-    # after the walk and throw the kept list away, so the evening note
-    # tracked a portfolio nobody owned. On 03-Aug-2026 the report followed
-    # KALYANKJIL (ASM Stage I, vetoed out) while the real book held
-    # ADANIGREEN, and every figure in the note -- including cycle
-    # performance -- was computed on the wrong ten names.
-    ranked_order = list(full.index)
-    veto_dropped, veto_ran = [], False
-    if config.VETO_ENABLED:
-        try:
-            import surveillance
-            kept, veto_dropped, _added, veto_ran = surveillance.apply_veto(
-                basket, ranked_order, sectors, session)
-            if veto_ran and kept:
-                basket_symbols = kept
-                # simulate_month fills its slots by walking ranked_order,
-                # NOT basket_symbols -- the latter only decides carry-forward
-                # HOLD vs SELL. So the vetoed names have to come out of the
-                # ranking itself, otherwise the walk buys them anyway and a
-                # mid-month replacement could pick one too.
-                blocked = {s for s, _why in veto_dropped}
-                ranked_order = kept + [s for s in ranked_order
-                                       if s not in kept and s not in blocked]
-        except Exception as exc:                      # never break the note
-            logger.error("Veto step failed, continuing without it: %s", exc)
-            veto_ran = False
+    # ONE basket decision, shared with the order sheet and the CLI.
+    decision = strategy.basket_for(expiry, symbols, sectors, session=session)
+    hist = decision.hist
+    basket, full = decision.table, decision.full
+    basket_symbols = decision.symbols
+    ranked_order = decision.ranked_order
+    veto_dropped, veto_ran = decision.veto_dropped, decision.veto_ran
 
     fwd = strategy.load_price_history(as_of, symbols, days=60)
     merged = dict(hist)
@@ -354,66 +322,22 @@ def build_entry_sheet(expiry: date, session=None) -> dict:
 
     symbols = strategy.load_fo_universe()
     sectors = strategy.load_sector_map()
-    hist = strategy.load_price_history(expiry, symbols)
-    if expiry not in hist:
-        raise strategy.StrategyError(f"No bhavcopy for expiry {expiry}")
-    fo = scoring.normalize_fo_columns(nse_client.fetch_fo_bhavcopy(expiry))
-    signals = strategy.compute_signals_cached(hist, fo, expiry, symbols)
-    basket, full = strategy.rank_universe(signals, sectors)
-
-    kept, dropped, added, veto_ran = (basket["symbol"].tolist(), [], [], True)
-    # --- daily off-momentum judgement ----------------------------------
-    # Mid-month only; expiry day is mechanical. Additive to the 5% stop:
-    # it can bring a position out early and can do nothing else.
-    if config.LLM_EXIT_ENABLED and rpt.holdings:
-        import llm_judgment
-        for h in rpt.holdings:
-            try:
-                feat = llm_judgment.build_features(h.symbol, as_of, merged,
-                                                   entry=h.entry)
-                held_days = len([x for x in days if x >= h.entry_date])
-                v = llm_judgment.exit_judgement(h.symbol, feat, held_days,
-                                                h.entry, h.stop)
-            except Exception as exc:
-                logger.error("Exit judgement failed for %s: %s", h.symbol, exc)
-                continue
-            if v.get("exit_now"):
-                rpt.sell_orders.append({
-                    "symbol": h.symbol, "kind": "OFF_MOMENTUM", "limit": None,
-                    "reason": v.get("exit_reason", ""),
-                    "confidence": v.get("confidence"),
-                })
-
-    # --- how have the exits aged? --------------------------------------
-    # Mark every closed trade to today's close. If the stock is higher
-    # now than where we sold, the exit was wrong -- and it should be
-    # visible rather than quietly forgotten.
-    today_frame = merged.get(as_of)
-    for e in rpt.exits:
-        now = None
-        if today_frame is not None and e.symbol in today_frame.index:
-            c = today_frame.at[e.symbol, "close_price"]
-            if pd.notna(c) and c > 0:
-                now = float(c)
-        rpt.exited_review.append({
-            "symbol": e.symbol,
-            "reason": e.reason,
-            "exit_pct": round(e.pnl_pct, 2),
-            "now_pct": round((now - e.entry) / e.entry * 100, 2) if now else None,
-            "exit_date": e.exit_date,
-        })
-
-    if config.VETO_ENABLED:
-        try:
-            import surveillance
-            kept, dropped, added, veto_ran = surveillance.apply_veto(
-                basket, list(full.index), sectors, session)
-        except Exception as exc:
-            logger.error("Veto failed, proceeding without it: %s", exc)
-            veto_ran = False
+    decision = strategy.basket_for(expiry, symbols, sectors, session=session)
+    hist = decision.hist
+    basket, full = decision.table, decision.full
+    signals = decision.full          # scored frame, indexed by symbol
+    kept = decision.symbols
+    dropped, added, veto_ran = (decision.veto_dropped, decision.veto_added,
+                                decision.veto_ran)
+    # NOTE: a copy of build()'s off-momentum-judgement and exit-ageing
+    # blocks used to sit here, referencing `rpt`, `merged` and `days` --
+    # none of which exist in this function. `today_frame = merged.get(...)`
+    # is unconditional, so EVERY call raised NameError and the order sheet
+    # could not be produced at all. Removed 03-Aug-2026; those blocks
+    # belong to build() and are still there.
 
     band = config.ENTRY_BAND_PCT / 100.0
-    stop_pct_sheet = strategy.resolve_stop_pct(expiry, symbols, hist)
+    stop_pct_sheet = decision.stop_pct
     stop = stop_pct_sheet / 100.0
     target = config.V4_TARGET_PCT / 100.0
 
@@ -440,10 +364,19 @@ def build_entry_sheet(expiry: date, session=None) -> dict:
             continue
         lo, hi = close * (1 - band), close * (1 + band)
 
-        feat = llm_judgment.build_features(sym, expiry, hist, entry=close,
-                                           signals=signals,
-                                           universe_stats=universe_stats)
-        tgt = llm_judgment.get_or_set_target(sym, close, expiry, feat)
+        # Per-stock LLM targets are OFF (LLM_TARGET_ENABLED = False): they
+        # lost 13pp in the walk-forward. This block used to call
+        # llm_judgment unconditionally without importing it, and referenced
+        # an undefined `universe_stats`, so the order sheet raised NameError
+        # on every run. The live rule is the flat V4_TARGET_PCT.
+        if config.LLM_TARGET_ENABLED:
+            import llm_judgment
+            feat = llm_judgment.build_features(sym, expiry, hist, entry=close,
+                                               signals=signals)
+            tgt = llm_judgment.get_or_set_target(sym, close, expiry, feat)
+        else:
+            tgt = {"target_pct": config.V4_TARGET_PCT, "source": "flat",
+                   "basis": f"config.V4_TARGET_PCT = {config.V4_TARGET_PCT:.0f}%"}
         target = tgt["target_pct"] / 100.0
 
         rows.append({

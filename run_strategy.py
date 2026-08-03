@@ -43,16 +43,18 @@ def _setup_logging(verbose: bool):
 
 
 def _snapshot(expiry: date, symbols, sector_map):
-    """Score the universe as of an expiry date. Returns (basket, full_ranking)."""
-    hist = strategy.load_price_history(expiry, symbols)
-    if expiry not in hist:
-        raise strategy.StrategyError(
-            f"{expiry} has no cash-market bhavcopy -- is it a trading day?")
-    fo_raw = nse_client.fetch_fo_bhavcopy(expiry)
-    fo = scoring.normalize_fo_columns(fo_raw)
-    sig = strategy.compute_signals_cached(hist, fo, expiry, symbols)
-    basket, full = strategy.rank_universe(sig, sector_map)
-    return basket, full, hist
+    """
+    Score the universe as of an expiry date.
+
+    Delegates to strategy.basket_for so this command cannot disagree with
+    the evening note or the order sheet. It used to score independently
+    and skip the surveillance veto entirely, so `run_strategy.py basket`
+    printed ASM names that the basket actually sent to investors excluded.
+
+    Returns (basket_table, full_ranking, hist, decision).
+    """
+    d = strategy.basket_for(expiry, symbols, sector_map)
+    return d.table, d.full, d.hist, d
 
 
 def _load_holdings():
@@ -73,7 +75,9 @@ def cmd_basket(args):
     expiry = datetime.strptime(args.expiry, "%Y-%m-%d").date()
     symbols = strategy.load_fo_universe()
     sectors = strategy.load_sector_map()
-    basket, _, _ = _snapshot(expiry, symbols, sectors)
+    # decision.table is already the POST-veto ten, backfills included.
+    basket, _, _, decision = _snapshot(expiry, symbols, sectors)
+    basket = basket.copy()
     basket["sector"] = basket["symbol"].map(lambda s: sectors.get(s, "Unclassified"))
 
     cols = ["rank", "symbol", "sector", "close", "stop_loss", "target",
@@ -81,6 +85,15 @@ def cmd_basket(args):
     print(f"\nBasket from the {expiry} close\n")
     print(basket[cols].to_string(index=False,
                                  float_format=lambda v: f"{v:,.2f}"))
+    if decision.veto_dropped:
+        print("\nExcluded by surveillance:")
+        for sym, why in decision.veto_dropped:
+            print(f"  {sym} -- {why}")
+        if decision.veto_added:
+            print(f"Backfilled: {', '.join(decision.veto_added)}")
+    if not decision.veto_ran:
+        print("\nWARNING: the ASM feed did not answer -- this basket has NOT "
+              "been surveillance-checked.")
 
     if config.V4_CARRY_FORWARD:
         holdings = _load_holdings()

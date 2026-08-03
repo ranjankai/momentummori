@@ -694,6 +694,21 @@ class Position:
 
 
 @dataclass
+class BasketDecision:
+    """What `basket_for` decided, with the working shown."""
+    expiry: date
+    symbols: list                    # the ten to hold, veto applied
+    ranked_order: list               # full ranking, vetoed names removed
+    table: object                    # rank_universe DataFrame (pre-veto)
+    full: object                     # full scored frame
+    hist: dict
+    veto_dropped: list               # [(symbol, reason)]
+    veto_added: list                 # backfilled replacements
+    veto_ran: bool                   # False when the ASM feed failed
+    stop_pct: float
+
+
+@dataclass
 class Exit:
     symbol: str
     entry: float
@@ -720,6 +735,76 @@ class MonthResult:
     exits: list = field(default_factory=list)
     to_buy: list = field(default_factory=list)
     empty_slots: int = 0
+
+
+def basket_for(expiry: date, symbols=None, sector_map=None, session=None,
+               price_hist=None):
+    """
+    THE answer to "what ten names for this expiry". Use this everywhere.
+
+    Returns a BasketDecision. `ranked_order` already has vetoed names
+    removed, which matters because simulate_month fills its slots by
+    walking that list -- passing the vetoed set as `basket_symbols` alone
+    does nothing.
+
+    WHY THIS EXISTS
+      Three call sites used to derive the basket independently:
+      daily_report.build, daily_report.build_entry_sheet and
+      run_strategy.cmd_basket. Only two applied the surveillance veto, so
+      on 03-Aug-2026 the evening note tracked KALYANKJIL (ASM Stage I,
+      vetoed out of the basket actually sent) while the real book held
+      ADANIGREEN, and `run_strategy.py basket` printed a third answer
+      again. Same disease as the two expiry resolvers fixed that morning:
+      one concept, several implementations, and the wrong one live.
+    """
+    import scoring                                          # noqa: E402
+    import nse_client                                       # noqa: E402
+
+    symbols = symbols if symbols is not None else load_fo_universe()
+    sector_map = sector_map if sector_map is not None else load_sector_map()
+    hist = price_hist if price_hist is not None else load_price_history(expiry, symbols)
+    if expiry not in hist:
+        raise StrategyError(f"No bhavcopy for expiry {expiry}")
+
+    fo = scoring.normalize_fo_columns(nse_client.fetch_fo_bhavcopy(expiry))
+    signals = compute_signals_cached(hist, fo, expiry, symbols)
+    basket, full = rank_universe(signals, sector_map)
+
+    picks = basket["symbol"].tolist()
+    ranked = list(full.index)
+    dropped, added, veto_ran = [], [], False
+
+    if getattr(config, "VETO_ENABLED", False):
+        try:
+            import surveillance
+            kept, dropped, added, veto_ran = surveillance.apply_veto(
+                basket, ranked, sector_map, session)
+            if veto_ran and kept:
+                picks = kept
+                blocked = {s for s, _why in dropped}
+                ranked = kept + [s for s in ranked
+                                 if s not in kept and s not in blocked]
+        except Exception as exc:                    # never break a run
+            logger.error("Veto step failed, continuing without it: %s", exc)
+            veto_ran = False
+
+    stop_pct = resolve_stop_pct(expiry, symbols, hist)
+
+    # Rebuild the display table for the FINAL ten. A backfilled name is not
+    # in rank_universe's output -- it comes from the full ranking -- so
+    # filtering the original table silently returns nine rows.
+    table = full.loc[[s for s in picks if s in full.index]].reset_index()
+    if "symbol" not in table.columns and "index" in table.columns:
+        table = table.rename(columns={"index": "symbol"})
+    table.insert(0, "rank", range(1, len(table) + 1))
+    table["weight_pct"] = round(100 / max(len(picks), 1), 2)
+    table["stop_loss"] = (table["close"] * (1 - stop_pct / 100)).round(2)
+    table["target"] = (table["close"] * (1 + config.V4_TARGET_PCT / 100)).round(2)
+
+    return BasketDecision(expiry=expiry, symbols=picks, ranked_order=ranked,
+                          table=table, full=full, hist=hist,
+                          veto_dropped=dropped, veto_added=added,
+                          veto_ran=veto_ran, stop_pct=stop_pct)
 
 
 def simulate_month(ranked_order, price_by_date, hold_dates, sector_map,

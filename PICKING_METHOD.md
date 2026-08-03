@@ -25,9 +25,15 @@ Everything below uses ONLY data available at that session's close.
 
 ```python
 import strategy, pandas as pd, numpy as np
-uni = strategy.load_fo_universe()
-sec = strategy.load_sector_map()
+uni  = strategy.load_fo_universe()
+sec  = strategy.load_sector_map()
 hist = strategy.load_price_history(<anchor date mid-month>, uni, days=300)
+
+# MANDATORY. NSE ships unadjusted prices: after BAJFINANCE's 10:1 on
+# 16-06-2025 the old high still sits in the file, so `from52wh` read
+# -87.9% when the stock was 0.9% off its high. back_adjust=True restates
+# history and leaves today's price real.
+hist = strategy.adjust_holding_window(hist, sorted(hist), back_adjust=True)
 ```
 
 Per symbol, from the last 260 sessions up to the selection date:
@@ -147,10 +153,11 @@ Apply these as explicit, stated overrides:
    one nearer its 52-week high.
 3. **Do not take three names from one sector unless that sector is a
    clear leader** — top 3 by sector median `r20`.
-4. **Sanity-check `from52wh` against corporate actions.** NSE bhavcopy is
-   unadjusted. A reading worse than about −60% is usually an unadjusted
-   split or bonus, not a drawdown. Verify before excluding a name on it.
-   (BAJFINANCE showed −87.9% in Aug-2026; it was a bonus.)
+4. **`from52wh` is only trustworthy if you ran the adjustment in step 1.**
+   With it, BAJFINANCE reads −0.9% instead of −87.9%. Without it, every
+   name that has split or issued a bonus in the last year looks crashed.
+   If a reading is worse than about −60%, check you did step 1 before
+   acting on it.
 5. **Ignore derivatives data entirely** — rollover, cost of carry, open
    interest. That is what the production V4 engine ranks on, and it
    selects a near-disjoint basket (historical overlap with the trend

@@ -770,18 +770,42 @@ through it, which fills at the open. TRENT closed 3343.80 on 06-07-2026
 and opened 3080.00 against a 3120.75 stop: a -6.24% fill, not -5.00%.
 Same logic mirrored for targets (gap-up fills better than the target).
 
-### Corrected 13-cycle result, production path (`tools_run13.py`)
+### THE canonical 13-cycle number: +39.57%
 
-|  | before | after |
-|---|---|---|
-| accrued sum | +39.34% | **+36.87%** |
-| compounded Rs100 | 143.60 | **140.15** |
-| worst month | -3.98% | -4.07% |
-| positive | 8/13 | 8/13 |
-| t | 1.58 | 1.47 |
+`tools_run13.py` was RETIRED 03-Aug-2026. It chained carry-forward across
+expiries, a convention superseded when the reporting basis was fixed as
+fresh-start and additive. Two conventions producing two numbers is how
++36.87% briefly became the headline on the wrong basis.
 
-The gap-through fills cost more than the split guard saves. **+36.87% is
-the current number.** Anything quoting +39.34% or +39.57% is stale.
+Canonical runner: **`research/run13.py`**, which calls
+`strategy.simulate_month` through `research/harness.py`.
+
+| cycle | breadth | stop | return |
+|---|---|---|---|
+| 2025-03 | 27.3 | 10 | +4.97% |
+| 2025-04 | 45.5 | 5 | +0.28% |
+| 2025-05 | 54.0 | 5 | +1.50% |
+| 2025-06 | 63.3 | 5 | -3.20% |
+| 2025-07 | 56.8 | 5 | -4.25% |
+| 2025-08 | 50.0 | 5 | +4.47% |
+| 2025-09 | 55.4 | 5 | +4.29% |
+| 2025-10 | 71.2 | 5 | +2.46% |
+| 2025-11 | 59.0 | 5 | +3.38% |
+| 2025-12 | 55.1 | 5 | -3.51% |
+| 2026-01 | 40.0 | 10 | +13.61% |
+| 2026-02 | 48.1 | 5 | -4.02% |
+| 2026-03 | 19.4 | 10 | +19.61% |
+
+**sum +39.57% | mean 3.04%/mo | sd 7.01 | worst -4.25% | positive 9/13 |
+t 1.57**
+
+For reference only, the retired carry-forward convention gave +36.87%
+after the same fixes (+39.34% before them). Do not mix the two.
+
+Cross-check worth recording: the deleted `tools_stopsweep.py` produced
++39.57% for this convention too. The research code was arithmetically
+right; the problem was that it could not be TRUSTED without being checked
+against the engine. That is the whole argument for `harness.py`.
 
 ### Telegram outage 02-Aug to 03-Aug
 
@@ -817,9 +841,11 @@ lacks a parameter, add the parameter -- do not fork the loop.
   depends on this feature.
 - **Make `adjust_holding_window` call `corporate_actions.classify`**
   instead of the fixed [0.72, 1.40] band.
-- **No fresh-start additive runner exists on the production path.**
-  `tools_run13.py` chains carry-forward. The agreed reporting convention
-  is fresh-start and additive.
+- ~~No fresh-start additive runner~~ DONE 03-Aug-2026: `research/run13.py`.
+- **Add a cost cap so grey-zone corporate-action classification can be
+  turned on.** `CORP_ACTION_GREY_ZONE_ENABLED` is False because one NSE
+  fetch plus one LLM call per breach per symbol made `daily_report.build`
+  time out. A held-symbols-only call list would make it affordable.
 - ~~Revert the losing config~~ DONE 02-Aug-2026.
 - ~~Regime-pegged stop~~ DONE 02-Aug-2026 (breadth, 45% threshold).
 - ~~Validate the regime stop on the other 8 cycles~~ DONE. All 13 run

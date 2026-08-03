@@ -328,7 +328,14 @@ def adjust_holding_window(price_by_date, hold_dates, symbols=None,
                     else:
                         ratio = r if hard else 1.0
                     if abs(ratio - 1.0) > 1e-9:
-                        fac *= adj_prev / (c * fac)
+                        # Divide out the ACTION ratio, not the observed
+                        # move. A 1:2 split on a day the stock also fell
+                        # 10% shows observed 0.45; scaling by 1/0.45 would
+                        # erase the real -10% along with the split. The
+                        # classifier's 0.5 keeps it. When we fall back to
+                        # the band, ratio IS the observed move, so this
+                        # reduces to the previous behaviour exactly.
+                        fac *= 1.0 / ratio
             # store EVERY date, including the 1.0s before the first action:
             # back-adjustment divides the whole series by the final factor,
             # so the pre-action days are exactly the ones that must move.

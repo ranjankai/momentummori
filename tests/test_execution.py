@@ -144,6 +144,36 @@ def test_classifier_catches_a_bonus_the_band_misses(monkeypatch):
         f"bonus not neutralised: {closes}"
 
 
+def test_a_real_move_on_the_same_day_as_a_split_is_preserved(monkeypatch):
+    """
+    The classifier's RATIO must be divided out, not the observed move.
+
+    1:2 split on a day the stock also fell 10%: raw prices go 100 -> 45.
+    Scaling by 1/0.45 restates it as 100 -> 100 and erases the real loss.
+    Scaling by the classifier's 1/0.5 gives 100 -> 90, which is what
+    actually happened to the holder.
+    """
+    px = series("ACME", [(100, 101, 99, 100), (45, 46, 44, 45),
+                         (45, 46, 44, 45)])
+    dates = sorted(px)
+    stub_classifier(monkeypatch, "SPLIT", 0.5)
+    adj = strategy.adjust_holding_window(px, dates, symbols=["ACME"])
+    closes = [float(adj[d].at["ACME", "close_price"]) for d in dates]
+    assert closes[1] == pytest.approx(90.0, rel=1e-3), \
+        f"real -10% move erased along with the split: {closes}"
+
+
+def test_band_fallback_still_divides_out_the_observed_move(monkeypatch):
+    """Without a classifier verdict the band behaviour must be unchanged."""
+    px = series("ACME", [(100, 101, 99, 100), (50, 51, 49, 50),
+                         (50, 51, 49, 50)])
+    dates = sorted(px)
+    adj = strategy.adjust_holding_window(px, dates, symbols=["ACME"],
+                                         use_classifier=False)
+    closes = [float(adj[d].at["ACME", "close_price"]) for d in dates]
+    assert closes[1] == pytest.approx(closes[0], rel=1e-6)
+
+
 def test_classifier_keeps_a_genuine_grey_zone_fall(monkeypatch):
     """A real -20% day must survive when the filings show no action."""
     px = series("ACME", [(100, 101, 99, 100), (80, 81, 79, 80),

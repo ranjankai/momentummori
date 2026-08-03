@@ -74,7 +74,19 @@ def prices(ex, nx):
 
 
 def v4_basket(ex, top_n=10):
-    """The live engine's basket at `ex`, plus the regime stop it would use."""
+    """
+    The live engine's basket at `ex`, plus the regime stop it would use.
+
+    DELIBERATELY calls rank_universe, NOT strategy.basket_for, so the
+    surveillance veto is NOT applied. NSE publishes ASM as a current
+    snapshot and does not archive it per date, so vetoing a historical
+    basket with today's list is look-ahead. The consequence is a real gap:
+    the LIVE basket has the veto and the BACKTEST does not, so they can
+    differ by a name. On the 28-Jul-2026 expiry the live basket dropped
+    KALYANKJIL (ASM Stage I) and backfilled ADANIGREEN; a backtest of that
+    cycle would hold KALYANKJIL. Quantifying that gap needs an archived
+    ASM history we do not have.
+    """
     uni, sec = universe(), sectors()
     hist = strategy.load_price_history(ex, uni)
     stop_pct = strategy.resolve_stop_pct(ex, uni, hist)

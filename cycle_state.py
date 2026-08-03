@@ -267,6 +267,87 @@ def advance(state: dict, as_of: date, use_classifier=None) -> tuple:
 # reporting
 # ---------------------------------------------------------------------------
 
+def to_report(state: dict):
+    """
+    Present the state as a `daily_report.Report`.
+
+    Everything downstream -- render(), ledger.record(), the Telegram text
+    -- already speaks Report, so producing one keeps a single rendering
+    and a single audit path. Nothing about the evening note changes except
+    where the numbers came from.
+    """
+    import daily_report
+
+    def d(v):
+        return pd.to_datetime(v).date() if v else None
+
+    holdings, exits = [], []
+    total, slots = 0.0, state.get("slots") or config.PORTFOLIO_SIZE
+    for sym, pos in state["positions"].items():
+        if not pos.get("entry"):
+            continue
+        if pos["status"] == "EXITED":
+            e = daily_report.Exit(symbol=sym, entry=pos["entry"],
+                                  exit_px=pos["exit_px"], reason=pos["reason"],
+                                  exit_date=d(pos["exit_date"]))
+            exits.append(e)
+            total += e.pnl_pct
+        else:
+            # Holding IS strategy.Position: (symbol, entry, stop, target,
+            # entry_date, last). Keyword args so a field reorder cannot
+            # silently shift a date into a price slot again.
+            h = daily_report.Holding(symbol=sym, entry=pos["entry"],
+                                     stop=pos["stop"], target=pos["target"],
+                                     entry_date=d(pos["entry_date"]),
+                                     last=pos.get("last_close"))
+            holdings.append(h)
+            total += h.pnl_pct
+    holdings.sort(key=lambda h: -h.pnl_pct)
+    exits.sort(key=lambda e: e.exit_date or date.min)
+
+    rpt = daily_report.Report(
+        as_of=d(state["as_of"]), expiry=d(state["expiry"]),
+        entry_date=d(state["entry_date"]),
+        holdings=holdings, exits=exits,
+        mtd_return_pct=total / slots if slots else 0.0,
+        empty_slots=max(slots - len(holdings) - len(exits), 0),
+        veto_dropped=[tuple(x) for x in state.get("veto_dropped", [])],
+        veto_ran=True)
+    for h in holdings:
+        if state["positions"][h.symbol].get("stale"):
+            rpt.flagged_actions.append(
+                f"{h.symbol}: no price in today's bhavcopy -- carrying the "
+                f"previous close, stop not evaluated")
+    return rpt
+
+
+def build(as_of: date, session=None):
+    """
+    The evening Report, built incrementally. Drop-in for
+    `daily_report.build`: opens a cycle if there is no state, rolls over
+    when the expiry has passed, replays every missing session, persists,
+    and returns a Report.
+    """
+    state = load()
+    if state is None:
+        import daily_report
+        expiry = daily_report.governing_expiry(as_of,
+                                               strategy.known_trading_days())
+        logger.info("No stored state; opening the cycle from %s", expiry)
+        state = open_cycle(expiry, session=session)
+
+    nxt = pd.to_datetime(state["next_expiry"]).date()
+    if as_of > nxt:
+        logger.info("%s expiry has passed; opening the next cycle", nxt)
+        state = open_cycle(nxt, session=session)
+
+    state, applied = advance(state, as_of)
+    save(state)
+    if applied:
+        logger.info("Applied %d session(s) up to %s", len(applied), as_of)
+    return to_report(state)
+
+
 def summarise(state: dict) -> dict:
     """Per-position returns and the equal-weight cycle return."""
     slots = state.get("slots") or config.PORTFOLIO_SIZE

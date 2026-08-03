@@ -333,6 +333,14 @@ CORP_CACHE_ENABLED = True
 
 CORP_ACTION_LLM_ENABLED = True
 
+# Consult the classifier for GREY-ZONE moves (roughly -15% to -28%, where
+# a 5:4 bonus and a bad day look identical) during the holding-window
+# adjustment. OFF because it fires one NSE fetch plus one LLM call per
+# breach per symbol, and across the full universe that makes the daily
+# report time out. The hard band still catches every split without it;
+# this is precision, not safety. Turn on only with a capped symbol list.
+CORP_ACTION_GREY_ZONE_ENABLED = False
+
 # |predicted / observed - 1| above this is reported as non-reconciling.
 # 0.15 allows for genuine same-day price movement on top of the action
 # (e.g. BSE's 2:1 bonus implies 0.3333 against an observed 0.3499).

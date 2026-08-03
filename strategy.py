@@ -202,8 +202,65 @@ def load_sector_map() -> dict:
 # Prices
 # ---------------------------------------------------------------------------
 
+def _explain_breach(symbol, day, prev_close, close, observed, hard):
+    """
+    Decide the adjustment ratio for one suspicious day-on-day move.
+
+    Returns (ratio, source). ratio 1.0 means "leave it alone".
+
+    The classifier reads NSE's actual corporate-action filings, so it can
+    tell a 5:4 bonus from a bad day -- something a fixed band cannot. But
+    it can be disabled, rate-limited or wrong, and it must never make the
+    guard WEAKER than the band alone: if it cannot answer and the move is
+    outside the hard band, we still adjust, exactly as before.
+    """
+    try:
+        import corporate_actions
+        verdict = corporate_actions.classify(symbol, day, prev_close, close)
+    except Exception as exc:                     # never abort a run
+        logger.warning("Corporate-action classifier unavailable for %s %s: %s",
+                       symbol, day, exc)
+        verdict = None
+
+    cls, ratio = None, 1.0
+    if verdict:
+        cls = verdict.get("classification")
+        try:
+            ratio = float(verdict.get("adjustment_ratio") or 1.0)
+        except (TypeError, ValueError):
+            ratio = 1.0
+
+    if hard:
+        # Outside the hard band the move is not physically available to an
+        # F&O stock: the dynamic price band is +/-10% and flexes to ~20%,
+        # so a -50% day is a corporate action, full stop. The classifier
+        # may REFINE the ratio here; it may NOT veto the adjustment. A
+        # thin or stale filings feed otherwise returns GENUINE_MOVE and we
+        # book a fake -50% loss -- exactly the BSE failure, reintroduced.
+        if cls not in (None, "UNKNOWN", "GENUINE_MOVE") and ratio > 0 \
+                and abs(ratio - 1.0) > 1e-9:
+            return ratio, f"classifier:{cls}"
+        if cls == "GENUINE_MOVE":
+            logger.warning(
+                "%s %s: classifier called the %.1f%% move GENUINE, but it is "
+                "outside the hard band -- adjusting anyway", symbol, day,
+                (observed - 1) * 100)
+        return observed, "band"
+
+    # Grey zone: plausible as a real move AND as a small bonus (a 5:4 is
+    # -20%). Only the filings can separate them, so adjust ONLY on a
+    # positive identification. Silence means leave it alone.
+    if cls not in (None, "UNKNOWN", "GENUINE_MOVE") and ratio > 0 \
+            and abs(ratio - 1.0) > 1e-9:
+        logger.info("%s %s: %.1f%% move identified as %s, adjusting",
+                    symbol, day, (observed - 1) * 100, cls)
+        return ratio, f"classifier:{cls}"
+    return 1.0, "none"
+
+
 def adjust_holding_window(price_by_date, hold_dates, symbols=None,
-                          low=0.72, high=1.40, back_adjust=False):
+                          low=0.72, high=1.40, back_adjust=False,
+                          grey_low=0.85, grey_high=1.18, use_classifier=None):
     """
     Neutralise unadjusted corporate actions across the HOLDING window.
 
@@ -222,6 +279,16 @@ def adjust_holding_window(price_by_date, hold_dates, symbols=None,
     the overwhelmingly common case, so the cost is one close-series scan.
     Only breaching symbols on affected dates are copied.
     """
+    # OFF by default, deliberately. The hard band needs no network and is
+    # what protects against a split; the classifier only adds precision in
+    # the grey zone. Enabling it for every symbol in the universe turned a
+    # 3-second daily report into a timeout, because each grey-zone breach
+    # is an NSE fetch plus an LLM call. Turn it on for a specific symbol
+    # list, or set CORP_ACTION_GREY_ZONE_ENABLED once the cost is capped.
+    if use_classifier is None:
+        use_classifier = bool(getattr(config, "CORP_ACTION_GREY_ZONE_ENABLED",
+                                      False))
+
     dates = [d for d in hold_dates if d in price_by_date]
     if len(dates) < 2:
         return price_by_date
@@ -246,8 +313,16 @@ def adjust_holding_window(price_by_date, hold_dates, symbols=None,
             adj_prev = prev
             if adj_prev is not None:
                 r = (c * fac) / adj_prev
-                if r < low or r > high:
-                    fac *= adj_prev / (c * fac)
+                hard = (r < low or r > high)
+                grey = (r < grey_low or r > grey_high)
+                if grey:
+                    if use_classifier:
+                        ratio, _src = _explain_breach(
+                            sym, d, adj_prev, c * fac, r, hard)
+                    else:
+                        ratio = r if hard else 1.0
+                    if abs(ratio - 1.0) > 1e-9:
+                        fac *= adj_prev / (c * fac)
             # store EVERY date, including the 1.0s before the first action:
             # back-adjustment divides the whole series by the final factor,
             # so the pre-action days are exactly the ones that must move.

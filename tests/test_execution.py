@@ -24,6 +24,35 @@ import strategy
 # helpers
 # ---------------------------------------------------------------------------
 
+@pytest.fixture(autouse=True)
+def no_network(monkeypatch):
+    """
+    Hermetic by default. `adjust_holding_window` consults the corporate
+    action classifier, which hits NSE and Gemini; left live these tests
+    took 32s and their result depended on what a model said about a
+    made-up symbol. Tests that WANT the classifier stub it explicitly.
+    """
+    monkeypatch.setattr(strategy.config, "CORP_ACTION_LLM_ENABLED", False,
+                        raising=False)
+    monkeypatch.setattr(strategy.config, "CORP_ACTION_GREY_ZONE_ENABLED", False,
+                        raising=False)
+
+
+def stub_classifier(monkeypatch, classification, ratio):
+    """Force one verdict out of the classifier without any network."""
+    import corporate_actions
+    monkeypatch.setattr(
+        corporate_actions, "classify",
+        lambda symbol, day, prev_close, close, session=None: {
+            "symbol": symbol, "classification": classification,
+            "adjustment_ratio": ratio, "reconciles": True},
+    )
+    monkeypatch.setattr(strategy.config, "CORP_ACTION_LLM_ENABLED", True,
+                        raising=False)
+    monkeypatch.setattr(strategy.config, "CORP_ACTION_GREY_ZONE_ENABLED", True,
+                        raising=False)
+
+
 def frame(rows):
     """rows: {symbol: (open, high, low, close)} -> a bhavcopy-shaped frame."""
     return pd.DataFrame(
@@ -87,32 +116,58 @@ def test_genuine_fall_inside_the_band_survives():
     assert float(adj[dates[1]].at["ACME", "close_price"]) == pytest.approx(85)
 
 
-def test_KNOWN_LIMIT_large_real_move_is_treated_as_a_corporate_action():
-    """
-    Documents a real weakness rather than hiding it.
-
-    The guard uses a fixed [0.72, 1.40] band, so a genuine -35% collapse is
-    silently restated as if it were a split, and a 5:4 bonus (ratio 0.80)
-    slips through unadjusted. Only `corporate_actions.classify` can tell
-    the two apart, and this function does not call it yet.
-
-    In mitigation: F&O stocks have a +/-10% dynamic band, so a true -35%
-    single-day move is close to impossible, which is why the band is set
-    where it is. Change this test when the classifier is wired in.
-    """
+def test_without_the_classifier_the_band_alone_still_protects():
+    """A -35% day is outside the hard band, so it is adjusted regardless."""
     px = series("ACME", [(100, 101, 99, 100), (100, 101, 64, 65),
                          (65, 66, 64, 65)])
     dates = sorted(px)
-    adj = strategy.adjust_holding_window(px, dates, symbols=["ACME"])
-    assert float(adj[dates[1]].at["ACME", "close_price"]) != pytest.approx(65), \
-        "band no longer launders a -35% move -- update this test"
+    adj = strategy.adjust_holding_window(px, dates, symbols=["ACME"],
+                                         use_classifier=False)
+    assert float(adj[dates[1]].at["ACME", "close_price"]) != pytest.approx(65)
 
-    # the 5:4 bonus that slips through, for the same reason
-    px2 = series("ACME", [(100, 101, 99, 100), (80, 81, 79, 80),
-                          (80, 81, 79, 80)])
-    d2 = sorted(px2)
-    assert strategy.adjust_holding_window(px2, d2, symbols=["ACME"]) is px2, \
-        "5:4 bonus now caught -- update this test"
+
+def test_classifier_catches_a_bonus_the_band_misses(monkeypatch):
+    """
+    A 5:4 bonus is a 0.80 ratio -- inside the hard band, so the band alone
+    never sees it. The filings do. This is why the classifier is wired in.
+    """
+    px = series("ACME", [(100, 101, 99, 100), (80, 81, 79, 80),
+                         (80, 81, 79, 80)])
+    dates = sorted(px)
+    assert strategy.adjust_holding_window(px, dates, symbols=["ACME"],
+                                          use_classifier=False) is px
+
+    stub_classifier(monkeypatch, "BONUS", 0.80)
+    adj = strategy.adjust_holding_window(px, dates, symbols=["ACME"])
+    closes = [float(adj[d].at["ACME", "close_price"]) for d in dates]
+    assert closes[1] == pytest.approx(closes[0], rel=0.02), \
+        f"bonus not neutralised: {closes}"
+
+
+def test_classifier_keeps_a_genuine_grey_zone_fall(monkeypatch):
+    """A real -20% day must survive when the filings show no action."""
+    px = series("ACME", [(100, 101, 99, 100), (80, 81, 79, 80),
+                         (80, 81, 79, 80)])
+    dates = sorted(px)
+    stub_classifier(monkeypatch, "GENUINE_MOVE", 1.0)
+    assert strategy.adjust_holding_window(px, dates, symbols=["ACME"]) is px
+
+
+def test_classifier_cannot_veto_the_hard_band(monkeypatch):
+    """
+    Safety rule. A -50% day is not available to an F&O stock under a
+    +/-10% price band, so it is an action whatever the model says. A thin
+    or stale filings feed returns GENUINE_MOVE, and honouring that would
+    reintroduce the BSE bug: a fake -50% loss and a false EXIT alert.
+    """
+    px = series("ACME", [(100, 101, 99, 100), (50, 51, 49, 50),
+                         (50, 51, 49, 50)])
+    dates = sorted(px)
+    stub_classifier(monkeypatch, "GENUINE_MOVE", 1.0)
+    adj = strategy.adjust_holding_window(px, dates, symbols=["ACME"])
+    closes = [float(adj[d].at["ACME", "close_price"]) for d in dates]
+    assert closes[1] == pytest.approx(closes[0], rel=0.02), \
+        f"classifier vetoed the hard band: {closes}"
 
 
 def test_back_adjust_keeps_recent_prices_real():

@@ -152,6 +152,88 @@ def test_no_price_history_falls_back_rather_than_raising():
 
 
 # ---------------------------------------------------------------------------
+# surveillance veto -- the basket you actually own
+# ---------------------------------------------------------------------------
+
+def stub_veto(monkeypatch, vetoed):
+    import surveillance
+    monkeypatch.setattr(surveillance, "fetch_vetoed_symbols",
+                        lambda session=None: dict(vetoed))
+    return surveillance
+
+
+def test_veto_drops_and_backfills_to_full_size(monkeypatch):
+    surveillance = stub_veto(monkeypatch, {"S02": "ASM Stage I"})
+    sig = linear_universe(30)
+    basket, full = strategy.rank_universe(sig, sector_map=None)
+    kept, dropped, added, ran = surveillance.apply_veto(
+        basket, list(full.index), None)
+    assert ran is True
+    assert "S02" not in kept
+    assert [d[0] for d in dropped] == ["S02"]
+    assert len(kept) == config.PORTFOLIO_SIZE, "veto left the basket short"
+    assert added, "no backfill happened"
+
+
+def test_veto_backfill_respects_the_sector_cap(monkeypatch):
+    surveillance = stub_veto(monkeypatch, {"S00": "ASM Stage I"})
+    sig = linear_universe(30)
+    sectors = {f"S{i:02d}": ("Banks" if i < 8 else f"Sector{i}")
+               for i in range(30)}
+    kept, _dropped, _added, _ran = surveillance.apply_veto(
+        strategy.rank_universe(sig, sector_map=sectors)[0],
+        list(strategy.rank_universe(sig, sector_map=sectors)[1].index),
+        sectors)
+    banks = [s for s in kept if sectors[s] == "Banks"]
+    assert len(banks) <= 3, f"backfill breached the sector cap: {banks}"
+
+
+def test_a_vetoed_name_removed_from_the_ranking_is_never_bought():
+    """
+    The bug found 03-Aug-2026: simulate_month fills slots by walking
+    `ranked_order`, NOT `basket_symbols`. Passing the vetoed list only as
+    basket_symbols left the walk buying the vetoed name anyway, so the
+    evening note tracked KALYANKJIL (ASM Stage I) while the real book
+    held ADANIGREEN. The veto must come out of the RANKING.
+    """
+    import datetime as dt
+
+    def bars(sym, n=4, price=100.0):
+        out, d = {}, dt.date(2026, 1, 1)
+        for _ in range(n):
+            while d.weekday() >= 5:
+                d += dt.timedelta(days=1)
+            out.setdefault(d, {})[sym] = price
+            d += dt.timedelta(days=1)
+        return out
+
+    days, frames = [], {}
+    d = dt.date(2026, 1, 1)
+    for _ in range(4):
+        while d.weekday() >= 5:
+            d += dt.timedelta(days=1)
+        frames[d] = pd.DataFrame(
+            [{"open_price": 100.0, "high_price": 101.0,
+              "low_price": 99.0, "close_price": 100.0} for _ in range(3)],
+            index=["GOOD1", "VETOED", "GOOD2"])
+        days.append(d)
+        d += dt.timedelta(days=1)
+
+    ranked_with = ["GOOD1", "VETOED", "GOOD2"]
+    ranked_without = ["GOOD1", "GOOD2"]
+    sectors = {"GOOD1": "A", "VETOED": "B", "GOOD2": "C"}
+
+    res = strategy.simulate_month(ranked_with, frames, days, sectors,
+                                  top_n=2, carry_forward=False)
+    assert "VETOED" in {p.symbol for p in res.open_positions}, \
+        "fixture wrong: the vetoed name should be bought when ranked"
+
+    res2 = strategy.simulate_month(ranked_without, frames, days, sectors,
+                                   top_n=2, carry_forward=False)
+    assert "VETOED" not in {p.symbol for p in res2.open_positions}
+
+
+# ---------------------------------------------------------------------------
 # ledger
 # ---------------------------------------------------------------------------
 

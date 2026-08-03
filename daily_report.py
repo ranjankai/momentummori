@@ -133,6 +133,35 @@ def build(as_of: date, session=None) -> Report:
     basket, full = strategy.rank_universe(signals, sectors)
     basket_symbols = basket["symbol"].tolist()
 
+    # Apply the surveillance veto HERE, before the simulation, because
+    # this is the basket that was actually bought. build_entry_sheet
+    # vetoes and backfills; this function used to call apply_veto only
+    # after the walk and throw the kept list away, so the evening note
+    # tracked a portfolio nobody owned. On 03-Aug-2026 the report followed
+    # KALYANKJIL (ASM Stage I, vetoed out) while the real book held
+    # ADANIGREEN, and every figure in the note -- including cycle
+    # performance -- was computed on the wrong ten names.
+    ranked_order = list(full.index)
+    veto_dropped, veto_ran = [], False
+    if config.VETO_ENABLED:
+        try:
+            import surveillance
+            kept, veto_dropped, _added, veto_ran = surveillance.apply_veto(
+                basket, ranked_order, sectors, session)
+            if veto_ran and kept:
+                basket_symbols = kept
+                # simulate_month fills its slots by walking ranked_order,
+                # NOT basket_symbols -- the latter only decides carry-forward
+                # HOLD vs SELL. So the vetoed names have to come out of the
+                # ranking itself, otherwise the walk buys them anyway and a
+                # mid-month replacement could pick one too.
+                blocked = {s for s, _why in veto_dropped}
+                ranked_order = kept + [s for s in ranked_order
+                                       if s not in kept and s not in blocked]
+        except Exception as exc:                      # never break the note
+            logger.error("Veto step failed, continuing without it: %s", exc)
+            veto_ran = False
+
     fwd = strategy.load_price_history(as_of, symbols, days=60)
     merged = dict(hist)
     merged.update(fwd)
@@ -170,7 +199,7 @@ def build(as_of: date, session=None) -> Report:
 
     stop_pct = strategy.resolve_stop_pct(expiry, symbols, hist)
     res = strategy.simulate_month(
-        list(full.index), merged, days, sectors,
+        ranked_order, merged, days, sectors,
         basket_symbols=basket_symbols, carry_forward=True,
         stop_pct=stop_pct, candidate_fn=candidate_fn)
     holdings, exits, to_buy, mtd = (res.open_positions, res.exits,
@@ -259,16 +288,10 @@ def build(as_of: date, session=None) -> Report:
             "exit_date": e.exit_date,
         })
 
-    if config.VETO_ENABLED:
-        try:
-            import surveillance
-            _, dropped, _, ran = surveillance.apply_veto(
-                basket, list(full.index), sectors, session)
-            rpt.veto_dropped = dropped
-            rpt.veto_ran = ran
-        except Exception as exc:                      # never break the note
-            logger.error("Veto step failed, continuing without it: %s", exc)
-            rpt.veto_ran = False
+    # Already computed above, BEFORE the simulation, so the walk used the
+    # same ten names the veto left behind.
+    rpt.veto_dropped = veto_dropped
+    rpt.veto_ran = veto_ran
     return rpt
 
 

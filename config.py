@@ -339,7 +339,7 @@ CORP_ACTION_LLM_ENABLED = True
 # breach per symbol, and across the full universe that makes the daily
 # report time out. The hard band still catches every split without it;
 # this is precision, not safety. Turn on only with a capped symbol list.
-CORP_ACTION_GREY_ZONE_ENABLED = False
+CORP_ACTION_GREY_ZONE_ENABLED = True
 
 # |predicted / observed - 1| above this is reported as non-reconciling.
 # 0.15 allows for genuine same-day price movement on top of the action

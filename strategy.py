@@ -260,7 +260,8 @@ def _explain_breach(symbol, day, prev_close, close, observed, hard):
 
 def adjust_holding_window(price_by_date, hold_dates, symbols=None,
                           low=0.72, high=1.40, back_adjust=False,
-                          grey_low=0.85, grey_high=1.18, use_classifier=None):
+                          grey_low=0.85, grey_high=1.18, use_classifier=None,
+                          classify_symbols=None):
     """
     Neutralise unadjusted corporate actions across the HOLDING window.
 
@@ -316,7 +317,12 @@ def adjust_holding_window(price_by_date, hold_dates, symbols=None,
                 hard = (r < low or r > high)
                 grey = (r < grey_low or r > grey_high)
                 if grey:
-                    if use_classifier:
+                    # Only names that can actually affect P&L are worth an
+                    # NSE fetch and an LLM call. Everything else falls back
+                    # to the band, which needs no network.
+                    may_classify = use_classifier and (
+                        classify_symbols is None or sym in classify_symbols)
+                    if may_classify:
                         ratio, _src = _explain_breach(
                             sym, d, adj_prev, c * fac, r, hard)
                     else:
@@ -762,7 +768,14 @@ def simulate_month(ranked_order, price_by_date, hold_dates, sector_map,
 
     # Splits and bonuses are not a P&L event -- the broker adjusts the
     # resting stop on the ex-date. Neutralise them before walking prices.
-    price_by_date = adjust_holding_window(price_by_date, hold_dates)
+    # The classifier is consulted ONLY for names that can actually be
+    # held: this month's basket plus anything carried in. Letting it loose
+    # on all ~206 universe symbols fired one NSE fetch and one LLM call
+    # per grey-zone move and timed the daily report out.
+    _classify = set(basket_symbols or []) | set((carry_in or {}).keys())
+    price_by_date = adjust_holding_window(
+        price_by_date, hold_dates,
+        classify_symbols=_classify or None)
 
     held = {i: None for i in range(top_n)}
     sector_count, banned, pending = {}, set(), []

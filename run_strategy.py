@@ -71,6 +71,99 @@ def _save_holdings(holdings: dict):
         json.dump(holdings, fh, indent=2)
 
 
+def cmd_cycle(args):
+    """
+    Evening note built incrementally: stored state + ONE bhavcopy.
+
+    The expensive work -- ranking 208 symbols over 260 days, breadth, the
+    surveillance veto -- happens once, when the cycle opens. After that
+    each evening applies a single session. Re-running the same date is a
+    no-op: `advance` starts from the day AFTER the stored `as_of`.
+
+    Rolls itself over: once the date reaches the next expiry the old cycle
+    is closed and a new one opened from that expiry's basket.
+    """
+    import alerts
+    import cycle_state
+
+    as_of = (datetime.strptime(args.date, "%Y-%m-%d").date()
+             if args.date else date.today())
+
+    if args.open_expiry:
+        expiry = datetime.strptime(args.open_expiry, "%Y-%m-%d").date()
+        cycle_state.open_cycle(expiry)
+        print(f"Opened a new cycle from the {expiry} expiry.")
+
+    state = cycle_state.load()
+    if state is None:
+        expiry = daily_report_governing(as_of)
+        print(f"No stored state; opening from the {expiry} expiry "
+              f"(one-off, takes ~25s)...")
+        state = cycle_state.open_cycle(expiry)
+
+    # roll over when the cycle's own expiry has passed
+    nxt = datetime.strptime(state["next_expiry"], "%Y-%m-%d").date()
+    if as_of > nxt:
+        print(f"{nxt} expiry has passed -- opening the next cycle.")
+        state = cycle_state.open_cycle(nxt)
+
+    state, applied = cycle_state.advance(state, as_of)
+    cycle_state.save(state)
+    if not applied:
+        print(f"Nothing to apply: state is already at {state['as_of']}.")
+    else:
+        print(f"Applied {len(applied)} session(s): "
+              f"{', '.join(str(d) for d in applied)}")
+
+    summary = cycle_state.summarise(state)
+    text = render_cycle(summary)
+    print()
+    print(text)
+    if args.no_send:
+        print("\n(--no-send: not delivered)")
+        return
+    if not alerts.send(text):
+        print("\nDELIVERY FAILED -- see logs/app.log", file=sys.stderr)
+        sys.exit(2)
+
+
+def daily_report_governing(as_of):
+    import daily_report
+    return daily_report.governing_expiry(as_of, strategy.known_trading_days())
+
+
+def render_cycle(s: dict) -> str:
+    """Telegram HTML for the incremental note."""
+    import alerts
+    esc = alerts.esc
+    L = [f"<b>Momentum Tracker — {pd_date(s['as_of']):%d-%m-%y}</b>", "",
+         f"<b>Cycle performance: {s['cycle_pct']:+.2f}%</b>",
+         f"<i>since the {pd_date(s['expiry']):%d-%m-%y} expiry</i>", ""]
+    if s["exits"]:
+        L.append("<b>EXITED</b>")
+        for e in s["exits"]:
+            L.append(f"{esc(e['symbol'])}  {e['reason']} @ {e['exit_px']:,.2f} "
+                     f"({e['pct']:+.1f}%) on {pd_date(e['exit_date']):%d-%m-%y}")
+        L.append("")
+    if s["holds"]:
+        L.append("<b>CONTINUE TO HOLD</b>")
+        for h in s["holds"]:
+            flag = "  ⚠ no price today" if h["stale"] else ""
+            L.append(f"{esc(h['symbol'])}  {h['last']:,.2f}  "
+                     f"({h['pct']:+.1f}%){flag}")
+    if s["cash_slots"]:
+        L += ["", f"<i>{s['cash_slots']} slot(s) in cash until expiry.</i>"]
+    placeable = [h["symbol"] for h in s["holds"] if h["target_placeable"]]
+    if placeable:
+        L += ["", "<b>Target now placeable</b> (inside the ±10% band): "
+              + ", ".join(esc(x) for x in placeable)]
+    return "\n".join(L)
+
+
+def pd_date(v):
+    return datetime.strptime(str(v)[:10], "%Y-%m-%d").date()
+
+
 def cmd_basket(args):
     expiry = datetime.strptime(args.expiry, "%Y-%m-%d").date()
     symbols = strategy.load_fo_universe()
@@ -400,6 +493,14 @@ def main():
     b = sub.add_parser("basket", help="generate the basket for one expiry")
     b.add_argument("--expiry", required=True, help="YYYY-MM-DD (the expiry date)")
     b.set_defaults(func=cmd_basket)
+
+    c = sub.add_parser("cycle", help="incremental evening note (state + 1 bhavcopy)")
+    c.add_argument("--date", help="YYYY-MM-DD (defaults to today)")
+    c.add_argument("--open", dest="open_expiry",
+                   help="YYYY-MM-DD: start a new cycle from this expiry")
+    c.add_argument("--no-send", action="store_true",
+                   help="print the note without sending it to Telegram")
+    c.set_defaults(func=cmd_cycle)
 
 
     args = p.parse_args()

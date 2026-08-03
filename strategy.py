@@ -872,10 +872,16 @@ def simulate_month(ranked_order, price_by_date, hold_dates, sector_map,
     # model answers, so two runs of the same backtest can disagree, and it
     # turned one cycle from instant into 23.7s. Backtests must be
     # deterministic and offline; research/harness.py passes False.
-    _classify = set(basket_symbols or []) | set((carry_in or {}).keys())
+    # Limit BOTH the band scan and the classifier to names that can be
+    # held. Previously only the classifier was limited, so the band still
+    # swept all ~208 universe symbols and warned about corporate actions
+    # in stocks we do not own (IVZINNIFTY, NARMADA on 03-Aug-2026) --
+    # wasted work, and a warning that trains you to ignore warnings.
+    _held = set(basket_symbols or []) | set((carry_in or {}).keys())
     price_by_date = adjust_holding_window(
         price_by_date, hold_dates,
-        classify_symbols=_classify or None,
+        symbols=sorted(_held) or None,
+        classify_symbols=_held or None,
         use_classifier=use_classifier)
 
     held = {i: None for i in range(top_n)}

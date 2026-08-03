@@ -10,7 +10,10 @@ data/cache/
 
 # Generated pipeline/strategy output and live position state:
 # latest.json, backtest_result*.json, v4_backtest.json,
-# basket_YYYYMMDD.json, v4_holdings.json
+# basket_YYYYMMDD.json, v4_holdings.json, cycle_state.json
+# cycle_state.json is per-machine live position state -- committing it
+# would let one desktop overwrite the other's record of what is held.
+data/cycle_state.json
 data/*.json
 
 # One-off analysis exports

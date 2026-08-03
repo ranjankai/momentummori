@@ -57,6 +57,13 @@ STATE_FILE = os.path.join(config.DATA_DIR, "cycle_state.json")
 _OHLC = {"OpnPric": "open_price", "HghPric": "high_price",
          "LwPric": "low_price"}
 
+# Kept identical to strategy.adjust_holding_window's defaults. If these
+# ever diverge, the daily note and the backtest disagree about what a
+# corporate action is -- which is how a 5:4 bonus slipped through here on
+# the night this module was written.
+HARD_LOW, HARD_HIGH = 0.72, 1.40      # certainly an action: adjust regardless
+GREY_LOW, GREY_HIGH = 0.85, 1.18      # ambiguous: only the filings can say
+
 
 # ---------------------------------------------------------------------------
 # one day's prices
@@ -161,11 +168,17 @@ def _apply_corporate_action(pos, close, day, use_classifier):
     if not prev or prev <= 0 or not close or close <= 0:
         return 1.0
     r = close / prev
-    if config.V4_SPLIT_RATIO_LOW <= r <= config.V4_SPLIT_RATIO_HIGH:
+
+    # Use the SAME thresholds as strategy.adjust_holding_window, not the
+    # legacy V4_SPLIT_RATIO_* constants (0.6-1.8). Those are wider, so a
+    # 3:2 bonus (0.667) or 5:4 (0.80) fell straight through and the
+    # classifier -- which exists precisely for those -- was never asked.
+    hard = (r < HARD_LOW or r > HARD_HIGH)
+    grey = (r < GREY_LOW or r > GREY_HIGH)
+    if not grey:
         return 1.0
 
-    hard = True
-    ratio = r
+    ratio = r if hard else 1.0
     if use_classifier:
         ratio, _src = strategy._explain_breach(pos["symbol"], day, prev,
                                                close, r, hard)

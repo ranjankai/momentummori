@@ -147,7 +147,19 @@ def rank_v11(df, sec, ban):
     return picks, len(d)
 
 
-def bars(hist, sym, lo, hi):
+def bars(hist, sym, lo, hi, split_guard=True):
+    """
+    OHLC over (lo, hi].
+
+    NSE bhavcopy is NOT corporate-action adjusted, and `strategy.split_adjust`
+    is only applied to the volatility lookback -- never to the forward
+    holding window. An unadjusted split reads as a catastrophic one-day
+    crash and trips every stop. BSE's 2:1 on 23-05-2025 alone dragged the
+    Apr-2025 cycle by -6.2pp until this guard was added.
+
+    Any one-day ratio outside [0.72, 1.40] is treated as a corporate action
+    and every later bar is rescaled by the implied factor.
+    """
     out = []
     for d in sorted(hist):
         if not (lo < d <= hi):
@@ -160,8 +172,20 @@ def bars(hist, sym, lo, hi):
             continue
         g = lambda k: (float(f.at[sym, k]) if k in f.columns
                        and pd.notna(f.at[sym, k]) else float(c))
-        out.append((d, g("open_price"), g("high_price"), g("low_price"), float(c)))
-    return out
+        out.append([d, g("open_price"), g("high_price"), g("low_price"), float(c)])
+
+    if split_guard:
+        factor = 1.0
+        for i in range(1, len(out)):
+            prev = out[i - 1][4] / factor if factor != 1.0 else out[i - 1][4]
+            raw = out[i][4]
+            r = raw / prev if prev > 0 else 1.0
+            if r < 0.72 or r > 1.40:
+                factor *= prev / raw
+            if factor != 1.0:
+                for j in (1, 2, 3, 4):
+                    out[i][j] *= factor
+    return [tuple(x) for x in out]
 
 
 def atr20_at(hist, sym, upto):

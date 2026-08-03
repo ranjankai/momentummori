@@ -202,6 +202,79 @@ def load_sector_map() -> dict:
 # Prices
 # ---------------------------------------------------------------------------
 
+def adjust_holding_window(price_by_date, hold_dates, symbols=None,
+                          low=0.72, high=1.40):
+    """
+    Neutralise unadjusted corporate actions across the HOLDING window.
+
+    `split_adjust` only cleans the volatility lookback. The prices a
+    position is actually walked against -- the OHLC read in
+    simulate_month -- were never adjusted, so a split read as a crash and
+    tripped the stop. BSE's 2:1 on 23-05-2025 booked a -61.99% "loss" and
+    cost the Apr-2025 cycle 6.2 percentage points. Live, the same event
+    sends a spurious EXIT alert on a stock that merely split.
+
+    A broker adjusts the resting stop on the ex-date, so the correct
+    modelling is for the split to be a non-event. Every bar from the
+    ex-date onward is rescaled by the implied factor.
+
+    Returns the original dict untouched when nothing breaches, which is
+    the overwhelmingly common case, so the cost is one close-series scan.
+    Only breaching symbols on affected dates are copied.
+    """
+    dates = [d for d in hold_dates if d in price_by_date]
+    if len(dates) < 2:
+        return price_by_date
+
+    syms = symbols
+    if syms is None:
+        first = price_by_date[dates[0]]
+        syms = list(first.index)
+
+    factors = {}
+    for sym in syms:
+        prev, fac = None, 1.0
+        per_date = {}
+        for d in dates:
+            frame = price_by_date[d]
+            if sym not in frame.index:
+                continue
+            c = frame.at[sym, "close_price"]
+            if pd.isna(c) or c <= 0:
+                continue
+            c = float(c)
+            adj_prev = prev
+            if adj_prev is not None:
+                r = (c * fac) / adj_prev
+                if r < low or r > high:
+                    fac *= adj_prev / (c * fac)
+            if fac != 1.0:
+                per_date[d] = fac
+            prev = c * fac
+        if per_date:
+            factors[sym] = per_date
+
+    if not factors:
+        return price_by_date
+
+    logger.warning("Corporate-action adjustment applied over the holding "
+                   "window for: %s", ", ".join(sorted(factors)))
+    out = dict(price_by_date)
+    touched = sorted({d for pd_ in factors.values() for d in pd_})
+    cols = ("open_price", "high_price", "low_price", "close_price")
+    for d in touched:
+        frame = out[d].copy()
+        for sym, per_date in factors.items():
+            f = per_date.get(d)
+            if not f or sym not in frame.index:
+                continue
+            for col in cols:
+                if col in frame.columns and pd.notna(frame.at[sym, col]):
+                    frame.at[sym, col] = float(frame.at[sym, col]) * f
+        out[d] = frame
+    return out
+
+
 def split_adjust(closes: list, symbol: str = None, dates: list = None,
                  session=None, flagged: list = None) -> list:
     """
@@ -583,6 +656,10 @@ def simulate_month(ranked_order, price_by_date, hold_dates, sector_map,
     carry_forward = config.V4_CARRY_FORWARD if carry_forward is None else carry_forward
     max_per_sector = max(1, int(top_n * config.MAX_SECTOR_WEIGHT_PCT / 100))
 
+    # Splits and bonuses are not a P&L event -- the broker adjusts the
+    # resting stop on the ex-date. Neutralise them before walking prices.
+    price_by_date = adjust_holding_window(price_by_date, hold_dates)
+
     held = {i: None for i in range(top_n)}
     sector_count, banned, pending = {}, set(), []
     pnl = [0.0] * top_n
@@ -715,11 +792,23 @@ def simulate_month(ranked_order, price_by_date, hold_dates, sector_map,
                 continue
             low = frame.at[pos.symbol, "low_price"]
             high = frame.at[pos.symbol, "high_price"]
+            opn = frame.at[pos.symbol, "open_price"] \
+                if "open_price" in frame.columns else None
             exit_px, reason = None, None
+            # A resting order fills AT its price when the level trades --
+            # but a session that GAPS through it fills at the open, which
+            # is worse than the stop and better than the target. That gap
+            # is the only way a stop loses more than its width: TRENT
+            # closed 3343.80 on 06-07-2026 and opened 3080.00 against a
+            # 3120.75 stop, so the fill was -6.24%, not -5.00%.
             if pd.notna(low) and low <= pos.stop:
                 exit_px, reason = pos.stop, "STOP"
+                if opn is not None and pd.notna(opn) and float(opn) < pos.stop:
+                    exit_px = float(opn)
             elif pd.notna(high) and high >= pos.target:
                 exit_px, reason = pos.target, "TARGET"
+                if opn is not None and pd.notna(opn) and float(opn) > pos.target:
+                    exit_px = float(opn)
             if exit_px is None:
                 continue
 

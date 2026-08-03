@@ -89,6 +89,21 @@ def governing_expiry(as_of: date, trading_days=None) -> date:
     after that expiry are the ones live today.
     """
     y, m = as_of.year, as_of.month
+
+    # Resolve the RAW weekday first. expiry_for() with a trading-day set
+    # rolls back to the previous session, and that roll-back can only find
+    # days that are already cached -- i.e. in the past. Asking it about a
+    # future expiry (3-Aug looking at 25-Aug) walks back 10 days, finds
+    # nothing cached, and raises. So decide which cycle we are in using the
+    # raw date, which needs no calendar and cannot fail.
+    raw = strategy.expiry_for(y, m)
+    if raw >= as_of and (raw - as_of).days > 10:
+        y, m = (y - 1, 12) if m == 1 else (y, m - 1)
+
+    # Within 10 days of the raw date the roll-back is safe AND necessary:
+    # if the raw weekday is a holiday the true expiry is earlier, e.g.
+    # 31-Mar-2026 was Mahavir Jayanti so the expiry was the 30th. Resolving
+    # it properly is what keeps that one day from reporting the wrong cycle.
     exp = strategy.expiry_for(y, m, trading_days=trading_days)
     if exp >= as_of:
         y, m = (y - 1, 12) if m == 1 else (y, m - 1)

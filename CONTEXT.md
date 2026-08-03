@@ -730,8 +730,96 @@ which made `market_breadth` return `nan` and silently fall back to the
 5% stop. Any helper calling `market_breadth` or `resolve_stop_pct` must
 load the FULL history window -- the 200-DMA needs 200 sessions.
 
+## 03-Aug-2026 evening -- three production bugs fixed
+
+### 1. Daily report crashed for the whole first half of every month
+
+`daily_report.governing_expiry` asked `expiry_for` to holiday-adjust the
+CURRENT month's expiry before checking whether that expiry had happened.
+The roll-back can only find days already in `known_trading_days()`, which
+is inferred from cached bhavcopy -- the past. On 03-Aug it looked at
+25-Aug, walked back 10 days, found nothing, and raised. Fixed by
+resolving the raw weekday first (no calendar, cannot fail) to decide the
+cycle, then applying roll-back only to the returned past expiry. The
+10-day window preserves the holiday case (31-Mar-2026 Mahavir Jayanti ->
+30-Mar). Verified across the rule change and both holiday shapes.
+
+Root cause worth remembering: this DUPLICATED `run_strategy.resolve_expiry`,
+which already solved the same problem correctly via the NSE holiday feed.
+The duplicate is the one that broke.
+
+### 2. Corporate actions were never applied to the holding window
+
+`split_adjust` only ever cleaned the volatility lookback. The OHLC that
+positions are walked against was raw. BSE's 2:1 on 23-05-2025 read as a
+-61.99% crash, tripped the stop, and cost the Apr-2025 cycle 6.2pp. LIVE,
+the same event fires a spurious EXIT alert on a stock that merely split.
+New `strategy.adjust_holding_window` rescales every bar from the ex-date,
+which is what a broker's GTT adjustment achieves. Returns the input
+untouched when nothing breaches, so the normal-case cost is one scan.
+
+LIMIT: triggers on a one-day ratio outside [0.72, 1.40], so a 5:4 bonus
+slips through. It should call `corporate_actions.classify` instead of
+using a fixed band.
+
+### 3. Stops could not lose more than their width
+
+`simulate_month` filled at `pos.stop` on any intraday touch. Correct for
+a resting order that trades AT the level -- wrong when the session GAPS
+through it, which fills at the open. TRENT closed 3343.80 on 06-07-2026
+and opened 3080.00 against a 3120.75 stop: a -6.24% fill, not -5.00%.
+Same logic mirrored for targets (gap-up fills better than the target).
+
+### Corrected 13-cycle result, production path (`tools_run13.py`)
+
+|  | before | after |
+|---|---|---|
+| accrued sum | +39.34% | **+36.87%** |
+| compounded Rs100 | 143.60 | **140.15** |
+| worst month | -3.98% | -4.07% |
+| positive | 8/13 | 8/13 |
+| t | 1.58 | 1.47 |
+
+The gap-through fills cost more than the split guard saves. **+36.87% is
+the current number.** Anything quoting +39.34% or +39.57% is stale.
+
+### Telegram outage 02-Aug to 03-Aug
+
+The group was upgraded to a supergroup, which permanently re-issues the
+chat ID (basic groups have short negative IDs; supergroups start -100).
+Telegram returned 400 with `migrate_to_chat_id` and the bot posted to a
+dead address for two days. `alerts.py` now reads that field and retries
+once against the new ID, logging a loud instruction to update `.env`.
+
+STILL MISSING: nothing alarms when a trading day passes with no delivery.
+The failure was found by the user noticing, not by the system.
+
+### research/ quarantined
+
+Nine scripts that reimplemented the position walk instead of calling
+`simulate_month` were moved to `research/` with a README. Same defect as
+the old `sim()` helper. Every comparison run on 03-Aug (the 2x2 matrix,
+the ATR SOP, the v1.1 selector, the Altcase gap, the stop sweep, the
+breadth de-risk sweep, the overlap matching) came from those files and is
+UNVERIFIED until re-run through `simulate_month`.
+
+Rule going forward: new backtests call `strategy.simulate_month`. If it
+lacks a parameter, add the parameter -- do not fork the loop.
+
 ## Pending Tasks
 
+- **Re-run every 03-Aug comparison through `simulate_month`.** See
+  `research/README.md` for the list.
+- **Add a dead-man's alarm on alert delivery** -- if no message lands on a
+  trading day, escalate somewhere that is not the same channel.
+- **Split-guard `from52wh`** -- BAJFINANCE read -87.9% below its 52w high
+  on 31-Jul-2026; that was a bonus, not a drawdown. `PICKING_METHOD.md`
+  depends on this feature.
+- **Make `adjust_holding_window` call `corporate_actions.classify`**
+  instead of the fixed [0.72, 1.40] band.
+- **No fresh-start additive runner exists on the production path.**
+  `tools_run13.py` chains carry-forward. The agreed reporting convention
+  is fresh-start and additive.
 - ~~Revert the losing config~~ DONE 02-Aug-2026.
 - ~~Regime-pegged stop~~ DONE 02-Aug-2026 (breadth, 45% threshold).
 - ~~Validate the regime stop on the other 8 cycles~~ DONE. All 13 run

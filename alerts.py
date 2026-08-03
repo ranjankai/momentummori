@@ -79,6 +79,23 @@ def _chunks(text: str, limit: int):
     return out
 
 
+def _migrated_chat_id(resp):
+    """
+    The new chat ID when Telegram reports a supergroup migration, else None.
+
+    Body looks like:
+      {"ok":false,"error_code":400,
+       "description":"Bad Request: group chat was upgraded to a supergroup chat",
+       "parameters":{"migrate_to_chat_id":-1004302637432}}
+    """
+    try:
+        params = (resp.json() or {}).get("parameters") or {}
+        new_id = params.get("migrate_to_chat_id")
+        return str(new_id) if new_id is not None else None
+    except Exception:
+        return None
+
+
 def send(text: str) -> bool:
     """
     Deliver `text` to the configured chat. Returns True only if EVERY
@@ -97,6 +114,7 @@ def send(text: str) -> bool:
     all_ok = True
 
     for chat_id in chats:
+        tried = {chat_id}
         for idx, part in enumerate(parts, 1):
             delivered = False
             for attempt in range(1, config.MAX_RETRIES + 1):
@@ -125,6 +143,21 @@ def send(text: str) -> bool:
                     # Neither is fixed by retrying; fail this chat fast and
                     # keep going so one bad recipient cannot stop the rest.
                     if resp.status_code in (400, 403):
+                        # Telegram re-issues the chat ID when a basic group
+                        # is upgraded to a supergroup, and hands us the new
+                        # one in `migrate_to_chat_id`. Without acting on it
+                        # the bot posts to a dead address indefinitely --
+                        # that cost two days of silent outage on 02-08-2026.
+                        new_id = _migrated_chat_id(resp)
+                        if new_id and new_id not in tried:
+                            logger.error(
+                                "chat %s was migrated to supergroup %s -- "
+                                "retrying, and UPDATE TELEGRAM_CHAT_ID in "
+                                ".env to make this permanent",
+                                chat_id, new_id)
+                            tried.add(new_id)
+                            chat_id = new_id
+                            continue
                         logger.error("chat %s chunk %d/%d rejected (%d): %s",
                                      chat_id, idx, len(parts),
                                      resp.status_code, resp.text[:200])

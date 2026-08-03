@@ -819,7 +819,8 @@ def simulate_month(ranked_order, price_by_date, hold_dates, sector_map,
                    stop_pct=None, target_pct=None,
                    carry_in: dict = None, basket_symbols=None,
                    carry_forward: bool = None,
-                   candidate_fn=None) -> MonthResult:
+                   candidate_fn=None,
+                   use_classifier: bool = None) -> MonthResult:
     """
     Day-by-day simulation of `top_n` equally weighted slots.
 
@@ -864,10 +865,18 @@ def simulate_month(ranked_order, price_by_date, hold_dates, sector_map,
     # held: this month's basket plus anything carried in. Letting it loose
     # on all ~206 universe symbols fired one NSE fetch and one LLM call
     # per grey-zone move and timed the daily report out.
+    #
+    # `use_classifier` is a CALLER decision, not a global. The live report
+    # wants it: a bonus that the band misses would otherwise fire a wrong
+    # stop. A backtest wants it OFF -- it makes results depend on what a
+    # model answers, so two runs of the same backtest can disagree, and it
+    # turned one cycle from instant into 23.7s. Backtests must be
+    # deterministic and offline; research/harness.py passes False.
     _classify = set(basket_symbols or []) | set((carry_in or {}).keys())
     price_by_date = adjust_holding_window(
         price_by_date, hold_dates,
-        classify_symbols=_classify or None)
+        classify_symbols=_classify or None,
+        use_classifier=use_classifier)
 
     held = {i: None for i in range(top_n)}
     sector_count, banned, pending = {}, set(), []

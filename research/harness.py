@@ -10,6 +10,15 @@ deleted on 03-Aug-2026.
 If you need behaviour `simulate_month` does not have, add a parameter to
 `simulate_month`. Do not fork the loop.
 
+CLASSIFIER
+  Backtests run with the corporate-action classifier ON, the same as the
+  live report, so both handle a 5:4-style bonus the price band alone
+  would miss. Accepted trade-off: a grey-zone move fires an NSE fetch and
+  a Gemini call, so a cycle takes ~24s instead of being instant, and a
+  re-run can in principle differ if the model answers differently.
+  `simulate_month(use_classifier=False)` turns it off if a reproducible
+  run is ever needed.
+
 CONVENTION
   Fresh-start and additive. Rs100 is deployed on the first session after
   an expiry and fully closed at the first session after the next expiry.

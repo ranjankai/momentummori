@@ -203,7 +203,7 @@ def load_sector_map() -> dict:
 # ---------------------------------------------------------------------------
 
 def adjust_holding_window(price_by_date, hold_dates, symbols=None,
-                          low=0.72, high=1.40):
+                          low=0.72, high=1.40, back_adjust=False):
     """
     Neutralise unadjusted corporate actions across the HOLDING window.
 
@@ -248,14 +248,38 @@ def adjust_holding_window(price_by_date, hold_dates, symbols=None,
                 r = (c * fac) / adj_prev
                 if r < low or r > high:
                     fac *= adj_prev / (c * fac)
-            if fac != 1.0:
-                per_date[d] = fac
+            # store EVERY date, including the 1.0s before the first action:
+            # back-adjustment divides the whole series by the final factor,
+            # so the pre-action days are exactly the ones that must move.
+            per_date[d] = fac
             prev = c * fac
-        if per_date:
+        if any(f != 1.0 for f in per_date.values()):
             factors[sym] = per_date
 
     if not factors:
         return price_by_date
+
+    if back_adjust:
+        # Forward-scaling restates everything onto the OLDEST basis, right
+        # for walking a position (the entry price is old) but wrong for
+        # features: BAJFINANCE would read Rs11,352 when it trades at
+        # Rs1,141. Dividing by the factor in force on the last day leaves
+        # recent prices untouched and restates history instead.
+        rebased = {}
+        for sym, per_date in factors.items():
+            last = per_date.get(dates[-1], 1.0) or 1.0
+            scaled = {d: f / last for d, f in per_date.items() if f / last != 1.0}
+            if scaled:
+                rebased[sym] = scaled
+        factors = rebased
+        if not factors:
+            return price_by_date
+    else:
+        factors = {s: {d: f for d, f in p.items() if f != 1.0}
+                   for s, p in factors.items()}
+        factors = {s: p for s, p in factors.items() if p}
+        if not factors:
+            return price_by_date
 
     logger.warning("Corporate-action adjustment applied over the holding "
                    "window for: %s", ", ".join(sorted(factors)))

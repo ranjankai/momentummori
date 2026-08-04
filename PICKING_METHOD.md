@@ -193,17 +193,50 @@ month's outcome when picking an earlier one.
 
 ---
 
+## What the target actually looks like — measured, not guessed
+
+The comparison portfolio's own picks, profiled on the selection date.
+This is the single most useful thing in this document: it tells you what
+you are aiming at before you start, and it is measured from their
+published baskets, not inferred.
+
+| month | their 10: above 20+50 DMA | median 20D ret | universe median 20D | median from 52w high |
+|---|---|---|---|---|
+| Jul-26 | 10/10 | +13.53% | +1.74% | −1.4% |
+| Feb-26 | 7/10 | +6.54% | −3.68% | −5.5% |
+| Mar-26 | 4/10 | −0.62% | +2.11% | −20.0% |
+| Apr-26 | 2/10 | −7.91% | −12.58% | −22.5% |
+
+Read it carefully, because it is the whole problem:
+
+- **Jul-26** they bought leaders sitting AT their highs. A plain trend
+  ranker reproduces **6 of their 10** there. That is the benchmark to beat.
+- **Apr-26** they bought wreckage — eight of ten BELOW both DMAs, 22%
+  off their highs — but names falling LESS than a universe down 12.58%.
+  Relative strength inside a decline, not absolute strength.
+- **Feb and Mar contradict any simple market-state rule.** Feb had a WEAK
+  tape (−3.68%) and they bought STRENGTH (+6.54%). Mar had a RISING tape
+  (+2.11%) and they bought WEAKNESS (−0.62%, 20% off highs). Whatever
+  switches their mode, it is not the market's direction that month.
+
+A mechanical grid search over 486 weight combinations scored **11/40**
+across these four months, and **0/10 in Mar-26 under every single
+combination**, because the DMA gate deletes six of the ten target names
+before scoring begins. That is why sections 2 and 6 exist. Beating 11/40
+is the bar; the regime split and the judgement overlay are the proposed
+means, and both are untested.
+
 ## Known limits, stated honestly
 
-- The comparison portfolio screens **NIFTY 500**, not F&O, and roughly
-  16 of its 38 weekly shortlisted names are cash-only. Some of its picks
-  are structurally unreachable from an F&O universe.
-- A pure mechanical version of this method was grid-searched over 486
-  weight combinations on 4 months. Best fitted result was 11/40 (~2.75/10),
-  and Mar-2026 scored 0/10 under every combination because the DMA gate
-  deleted 6 of the 10 target names. That failure is what motivated the
-  regime split in section 2 and the judgement overlay in section 6 — both
-  are UNTESTED.
+- The comparison portfolio screens **NIFTY 500**, not F&O, and about 16
+  of its 38 WEEKLY shortlisted names are cash-only. Its MONTHLY baskets,
+  though, are reachable: all 10 names mapped to the F&O universe in every
+  one of Feb, Mar, Apr and Jul 2026. So 10/10 is attainable in principle
+  for these months -- do not treat any miss as structural.
+- The 11/40 grid result above is the FITTED ceiling — weights chosen after
+  seeing the answers, on four months. Live performance would be lower.
+  Six weights on four observations is memorisation, which is exactly why
+  a judgement layer is being tried instead of more weight-tuning.
 - The regime rule itself is not established. Feb-2026 had a weak tape and
   the target basket was strong; Mar-2026 had a rising tape and the target
   basket was weak. A simple market-state switch does not reconcile them.

@@ -1,10 +1,15 @@
-# Monthly Stock Picking Methodology (judgement-assisted)
+# Monthly Stock Picking Methodology
 
-**For a fresh Claude instance. Do not open `top 10 scrips monthly.xlsx`, any
-Altcase report, or `/tmp/alt*.json` before producing your picks. Those hold
-the answer key. Produce the ten names first, save them, then score.**
+Universe: NSE F&O. Output: **exactly 10 symbols**, ranked 1–10.
 
-Universe: NSE F&O. Output: exactly 10 symbols, ranked 1-10.
+This is a price-and-volume selection method. It deliberately ignores the
+derivatives data (rollover, cost of carry, open interest) that the
+production V4 engine ranks on, because the two produce near-disjoint
+baskets and we want to see what the price-based one picks on its own.
+
+Work each month independently. Do not look at a later month's outcome
+when picking an earlier one, and do not look at any month's realised
+returns before saving your picks.
 
 ---
 
@@ -54,7 +59,7 @@ Discard symbols with fewer than 210 usable sessions.
 
 ---
 
-## 2. Read the regime FIRST — this decides everything downstream
+## 2. Read the regime FIRST — it decides everything downstream
 
 Compute across the eligible universe:
 
@@ -70,13 +75,17 @@ Classify:
 - **MIXED** — anything else
 
 This matters more than any individual stock feature. In Apr-2026 only
-**8 of 206** names were above both DMAs and universe median 20D was
-−12.58%. Any rule demanding "uptrend" returns an empty or absurd list
-there. In Jul-2026, 88 of 206 qualified and momentum worked normally.
+**8 of 206** names were above both DMAs and the universe median 20-day
+return was −12.58%. Any rule demanding "uptrend" returns an empty or
+absurd list there. In Jul-2026, 88 of 206 qualified and ordinary
+momentum ranking worked.
+
+**In a DAMAGED month, absolute strength does not exist.** What exists is
+relative strength: names falling less than the market. Rank on that.
 
 ---
 
-## 3. Hard filters (applied before any ranking)
+## 3. Hard filters (before any ranking)
 
 Always:
 
@@ -89,14 +98,14 @@ Regime-dependent:
 
 - **TRENDING** — require `close > dma20` AND `close > dma50`
 - **MIXED** — require `close > dma20` only
-- **DAMAGED** — no DMA filter at all; it would empty the list
+- **DAMAGED** — no DMA filter; it would empty the list
 
 ---
 
 ## 4. Rank
 
-Score the survivors. Weights are guidance, not gospel — the point of a
-judgement layer is that you may depart from them with a stated reason.
+Weights are guidance, not gospel. The point of a judgement layer is that
+you may depart from them with a stated reason.
 
 **TRENDING**
 
@@ -105,38 +114,43 @@ judgement layer is that you may depart from them with a stated reason.
 ```
 
 `sector_rank`: rank sectors by median `r20` across the universe, leaders
-first, and score member stocks by their sector's rank. Leading sectors
-have historically carried the basket.
+first, and score member stocks by their sector's rank.
 
-`from52wh` enters POSITIVELY — closer to the high is better. In Jul-2026
-a basket of names within ~1.5% of their highs was the right answer.
+`from52wh` enters POSITIVELY — closer to the high is better.
 
 **DAMAGED**
 
-Invert the strength terms. Rank on:
+Invert the strength terms:
 
 ```
-0.40 z(−from52wh) + 0.30 z(r20 relative to universe median) + 0.20 z(sector_rank) + 0.10 z(volsurge)
+0.40 z(−from52wh) + 0.30 z(r20 relative to the universe median) + 0.20 z(sector_rank) + 0.10 z(volsurge)
 ```
 
-i.e. prefer the most beaten names that are still falling LESS than the
-market. In Apr-2026 the right basket had median `r20` of −7.91% against
-a universe median of −12.58% — outperformers inside a decline, sitting
-~22% below their highs.
+Prefer beaten names that are still outperforming a falling market.
 
-**MIXED** — blend. Drop the `from52wh` term entirely and lean on `r20`
-relative strength plus sector leadership.
+**MIXED** — drop the `from52wh` term entirely and lean on `r20` relative
+strength plus sector leadership.
 
 ---
 
-## 5. Portfolio construction
+## 5. Portfolio construction — ALL TEN SLOTS MUST BE FILLED
 
-Walk the ranked list top-down:
+Walk the ranked list top-down, max **3 per sector**, until you have 10.
 
-- max **3 per sector**
-- stop at **10 names**
-- if fewer than 10 survive the filters, take what there is and hold the
-  remainder in cash; do not relax the liquidity floor to fill slots
+**You must return exactly 10 names. Cash is not an option here.** If the
+filters leave you short:
+
+1. Relax the regime DMA filter first (it is the most likely culprit — in
+   a bad month it can cut the pool to single digits). Never relax the
+   liquidity floor or the ban-list check; those are safety, not selection.
+2. If still short, relax the sector cap from 3 to 4, taking the
+   highest-ranked names.
+3. If still short, fill from the highest-ranked remaining names that pass
+   the liquidity and ban filters, whatever their trend state.
+
+State plainly which relaxations you used and for which slots. A 10-name
+list with two stated compromises is the deliverable; an 8-name list is
+not.
 
 ---
 
@@ -144,24 +158,21 @@ Walk the ranked list top-down:
 
 Apply these as explicit, stated overrides:
 
-1. **Reject bounce-in-a-broken-chart.** A name more than 40% below its
+1. **Reject a bounce in a broken chart.** A name more than 40% below its
    52-week high with `hv20` above ~50 is a dead-cat candidate, not a
-   leader. Exclude in TRENDING and MIXED regimes even if `r20` ranks it
-   highly. (KAYNES, Aug-2026: `r20` +14.1% but 50.6% off its high with
-   `hv20` 59.9.)
+   leader. Exclude in TRENDING and MIXED even if `r20` ranks it highly.
+   (KAYNES on 31-Jul-2026: `r20` +14.1% but 50.6% off its high, `hv20`
+   59.9.) In a DAMAGED regime this rule does not apply — there,
+   everything is below its high.
 2. **Prefer the intact chart when two names score within ~10%.** Take the
    one nearer its 52-week high.
-3. **Do not take three names from one sector unless that sector is a
-   clear leader** — top 3 by sector median `r20`.
+3. **Do not take three from one sector unless that sector is a clear
+   leader** — top 3 by sector median `r20`.
 4. **`from52wh` is only trustworthy if you ran the adjustment in step 1.**
-   With it, BAJFINANCE reads −0.9% instead of −87.9%. Without it, every
-   name that has split or issued a bonus in the last year looks crashed.
-   If a reading is worse than about −60%, check you did step 1 before
-   acting on it.
-5. **Ignore derivatives data entirely** — rollover, cost of carry, open
-   interest. That is what the production V4 engine ranks on, and it
-   selects a near-disjoint basket (historical overlap with the trend
-   approach ~7%). This methodology is deliberately price-and-volume only.
+   With it, BAJFINANCE reads −0.9% instead of −87.9%. If a reading is
+   worse than about −60%, check step 1 before acting on it.
+5. **Ignore derivatives data entirely.** Rollover, cost of carry, open
+   interest are the production engine's inputs, not this method's.
 
 ---
 
@@ -177,67 +188,27 @@ regime: TRENDING | MIXED | DAMAGED
 10  ...
 
 overrides applied: <list, with reasons>
-slots left in cash: N
+filters relaxed to reach 10: <list, or "none">
 ```
 
-Save to `data/picks_<YYYY-MM>.json` BEFORE looking at any comparison
-data.
+Save to `data/picks_<YYYY-MM>.json`.
 
 ---
 
 ## 8. Months to run
 
-Feb, Mar, Apr, Jul 2026 (May-2026 is absent from the comparison set and
-Jun-2026 is empty). Run each independently — do not look at a later
-month's outcome when picking an earlier one.
+**Feb, Mar, Apr and Jul 2026.** Each independently.
 
 ---
 
-## What the target actually looks like — measured, not guessed
+## Status of this method
 
-The comparison portfolio's own picks, profiled on the selection date.
-This is the single most useful thing in this document: it tells you what
-you are aiming at before you start, and it is measured from their
-published baskets, not inferred.
+Sections 2, 4 and 6 are a **hypothesis**, not a validated recipe. The
+regime split in particular is proposed rather than proven — it was
+written because a single fixed ranking demonstrably fails in months where
+the whole market is below its moving averages, but the specific
+thresholds and weights here have not been shown to work.
 
-| month | their 10: above 20+50 DMA | median 20D ret | universe median 20D | median from 52w high |
-|---|---|---|---|---|
-| Jul-26 | 10/10 | +13.53% | +1.74% | −1.4% |
-| Feb-26 | 7/10 | +6.54% | −3.68% | −5.5% |
-| Mar-26 | 4/10 | −0.62% | +2.11% | −20.0% |
-| Apr-26 | 2/10 | −7.91% | −12.58% | −22.5% |
-
-Read it carefully, because it is the whole problem:
-
-- **Jul-26** they bought leaders sitting AT their highs. A plain trend
-  ranker reproduces **6 of their 10** there. That is the benchmark to beat.
-- **Apr-26** they bought wreckage — eight of ten BELOW both DMAs, 22%
-  off their highs — but names falling LESS than a universe down 12.58%.
-  Relative strength inside a decline, not absolute strength.
-- **Feb and Mar contradict any simple market-state rule.** Feb had a WEAK
-  tape (−3.68%) and they bought STRENGTH (+6.54%). Mar had a RISING tape
-  (+2.11%) and they bought WEAKNESS (−0.62%, 20% off highs). Whatever
-  switches their mode, it is not the market's direction that month.
-
-A mechanical grid search over 486 weight combinations scored **11/40**
-across these four months, and **0/10 in Mar-26 under every single
-combination**, because the DMA gate deletes six of the ten target names
-before scoring begins. That is why sections 2 and 6 exist. Beating 11/40
-is the bar; the regime split and the judgement overlay are the proposed
-means, and both are untested.
-
-## Known limits, stated honestly
-
-- The comparison portfolio screens **NIFTY 500**, not F&O, and about 16
-  of its 38 WEEKLY shortlisted names are cash-only. Its MONTHLY baskets,
-  though, are reachable: all 10 names mapped to the F&O universe in every
-  one of Feb, Mar, Apr and Jul 2026. So 10/10 is attainable in principle
-  for these months -- do not treat any miss as structural.
-- The 11/40 grid result above is the FITTED ceiling — weights chosen after
-  seeing the answers, on four months. Live performance would be lower.
-  Six weights on four observations is memorisation, which is exactly why
-  a judgement layer is being tried instead of more weight-tuning.
-- The regime rule itself is not established. Feb-2026 had a weak tape and
-  the target basket was strong; Mar-2026 had a rising tape and the target
-  basket was weak. A simple market-state switch does not reconcile them.
-  Treat section 2 as a hypothesis you are testing, not a known truth.
+You are being asked to test it and to exercise judgement where it is
+silent or wrong, not to execute it mechanically. If your reading of the
+data contradicts a rule above, follow the data and say so.

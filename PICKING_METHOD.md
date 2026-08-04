@@ -2,10 +2,15 @@
 
 Universe: NSE F&O. Output: **exactly 10 symbols**, ranked 1–10.
 
-This is a price-and-volume selection method. It deliberately ignores the
-derivatives data (rollover, cost of carry, open interest) that the
-production V4 engine ranks on, because the two produce near-disjoint
-baskets and we want to see what the price-based one picks on its own.
+Price, volume AND derivatives data are all available to you. The
+production V4 engine ranks on derivatives alone — 0.50 z(volatility) +
+0.30 z(rollover) + 0.20 z(cost of carry) — and this method is built
+around price structure instead, because a ranking that ignores where a
+stock sits in its own trend has a blind spot.
+
+That is a change of emphasis, not a ban. Use the derivative signals as
+confirmation, as a tie-break, or to reject a name whose chart looks fine
+but whose positioning does not. Say when you did.
 
 Work each month independently. Do not look at a later month's outcome
 when picking an earlier one, and do not look at any month's realised
@@ -13,11 +18,26 @@ returns before saving your picks.
 
 ---
 
-## 0. Setup
+## 0. Setup and where the data lives
 
-Repo: `C:\Users\ranjan\Documents\momentum-tracker` (bash:
-`/sessions/<session>/mnt/momentum-tracker`). Price cache covers Oct-2023
-to Jul-2026 in `data/cache/`.
+Repo root: `C:\Users\ranjan\Documents\momentum-tracker`
+(in the Linux sandbox: `/sessions/<session>/mnt/momentum-tracker`)
+
+| what | path |
+|---|---|
+| cash bhavcopy cache, one CSV per session | `C:\Users\ranjan\Documents\momentum-tracker\data\cache\cm_YYYYMMDD.csv` |
+| F&O bhavcopy cache, one CSV per session | `C:\Users\ranjan\Documents\momentum-tracker\data\cache\fo_YYYYMMDD.csv` |
+| "NSE published nothing" markers | `...\data\cache\cm_YYYYMMDD.nodata` |
+| F&O universe (eligibility + lot sizes) | `C:\Users\ranjan\Documents\momentum-tracker\fo_mktlots.csv` |
+| sector map, symbol → sector | `C:\Users\ranjan\Documents\momentum-tracker\config\sectors.csv` |
+| cached derivative signals, per expiry | `C:\Users\ranjan\Documents\momentum-tracker\data\signals_cache\sig_YYYYMMDD.csv` |
+| corporate-action filings cache | `C:\Users\ranjan\Documents\momentum-tracker\data\corp_cache\` |
+| your output | `C:\Users\ranjan\Documents\momentum-tracker\data\picks_YYYY-MM.json` |
+| run log | `C:\Users\ranjan\Documents\momentum-tracker\logs\app.log` |
+
+The cash cache runs from **Oct-2023 to Jul-2026**; the F&O cache holds
+expiry dates only. Do not hand-parse these — the loaders below normalise
+NSE's column names, drop duplicate series rows and handle missing days.
 
 **Selection date** = the last trading session strictly BEFORE the 1st of
 the target month. Not the F&O expiry. (For Jul-2026 that is 30-Jun-2026.)
@@ -56,6 +76,36 @@ Per symbol, from the last 260 sessions up to the selection date:
 | `sector` | from `strategy.load_sector_map()` |
 
 Discard symbols with fewer than 210 usable sessions.
+
+### Derivative features, for the same date
+
+Available but NOT part of the core ranking. Use them as confirmation or
+a tie-break, and say when you did.
+
+```python
+import nse_client, scoring
+# the last monthly expiry ON OR BEFORE your selection date
+ex  = strategy.expiry_for(<year>, <month>, trading_days=strategy.known_trading_days())
+fo  = scoring.normalize_fo_columns(nse_client.fetch_fo_bhavcopy(ex))
+sig = strategy.compute_signals_cached(hist, fo, ex, uni)
+#   sig.volatility     63d annualised SD of daily returns
+#   sig.rollover       % of OI carried into the next series
+#   sig.cost_of_carry  annualised futures premium
+#   sig.turnover_cr    median daily turnover, INR crore
+```
+
+Richer per-symbol derivatives — basis, open interest across three
+series, futures volume, rollover against a 3-month baseline — are in
+`tools_features.fo_snapshot(expiry)` in the repo root.
+
+Two things worth knowing before you lean on them:
+
+- **Rollover is frozen between expiries.** It only changes when a series
+  rolls, so on any non-expiry selection date it is a stale reading of
+  what positioning looked like at the last expiry, not today.
+- **High volatility scores HIGHER in the production engine**, not lower.
+  That is deliberate and was measured. If you use volatility, be explicit
+  about which direction you are treating as good and why.
 
 ---
 
@@ -171,8 +221,11 @@ Apply these as explicit, stated overrides:
 4. **`from52wh` is only trustworthy if you ran the adjustment in step 1.**
    With it, BAJFINANCE reads −0.9% instead of −87.9%. If a reading is
    worse than about −60%, check step 1 before acting on it.
-5. **Ignore derivatives data entirely.** Rollover, cost of carry, open
-   interest are the production engine's inputs, not this method's.
+5. **Derivatives are a second opinion, not the ranking.** If a name
+   ranks well on price but its cost of carry is deeply negative, or its
+   rollover collapsed at the last expiry, that is a reason to prefer the
+   next candidate — state it. Do not rebuild the production engine's
+   score here; it already exists and picks a different basket.
 
 ---
 

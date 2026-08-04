@@ -53,7 +53,26 @@ def _nodata_path(prefix: str, trade_date: date) -> str:
     return os.path.join(config.CACHE_DIR, f"{prefix}_{trade_date:%Y%m%d}.nodata")
 
 
+# A 404 for a date this recent means "not published YET", not "never".
+# NSE puts the bhavcopy out around 18:00-18:30 IST; any run before that --
+# a 01:05 catch-up, a machine that woke early -- gets a 404 for today.
+# Recording that permanently made the file invisible after it appeared:
+# on 04-Aug-2026 two runs at 01:05 and 01:07 poisoned the date, the
+# 18:00 publication was never re-fetched, and the evening note silently
+# reported "not a trading day" all evening.
+NODATA_GRACE_DAYS = 4
+
+
+def _nodata_is_authoritative(trade_date: date) -> bool:
+    """False while a date is recent enough that NSE may still publish it."""
+    return (date.today() - trade_date).days > NODATA_GRACE_DAYS
+
+
 def _mark_nodata(prefix: str, trade_date: date) -> None:
+    if not _nodata_is_authoritative(trade_date):
+        logger.debug("Not recording a no-data marker for %s: too recent, NSE "
+                     "may still publish it", trade_date)
+        return
     try:
         with open(_nodata_path(prefix, trade_date), "w", encoding="utf-8") as fh:
             fh.write("no bhavcopy published for this date (HTTP 404)\n")
@@ -124,8 +143,19 @@ def _fetch_bhavcopy(prefix: str, url_template: str, required: set,
     # nothing. Holidays recur in every backtest window, so without this
     # the same 404s are re-requested on every single run.
     if use_cache and os.path.exists(_nodata_path(prefix, trade_date)):
-        raise NseNoDataError(
-            f"No {prefix.upper()} bhavcopy for {trade_date} (cached no-data marker)")
+        if _nodata_is_authoritative(trade_date):
+            raise NseNoDataError(
+                f"No {prefix.upper()} bhavcopy for {trade_date} "
+                f"(cached no-data marker)")
+        # Written before NSE published. Drop it and ask again, otherwise a
+        # single early run hides that day's data for good.
+        logger.info("Discarding the stale no-data marker for %s and "
+                    "re-fetching -- it was recorded before publication",
+                    trade_date)
+        try:
+            os.remove(_nodata_path(prefix, trade_date))
+        except OSError:
+            pass
 
     url = url_template.format(date=trade_date)
     try:

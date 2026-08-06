@@ -9,6 +9,7 @@ logging.disable(logging.CRITICAL)
 
 import strategy
 import scoring
+import nse_client
 
 # Exact verified ban lists for selection dates
 KNOWN_BAN_MAP = {
@@ -31,6 +32,20 @@ def get_selection_date(year, month):
     before = [d for d in days if d < target]
     return max(before)
 
+def load_cached_price_history(sel_date, num_days=270):
+    known = sorted([d for d in strategy.known_trading_days() if d <= sel_date])[-num_days:]
+    hist = {}
+    for d in known:
+        raw = nse_client.fetch_cm_bhavcopy(d)
+        norm = scoring.normalize_cm_columns(raw)
+        # Fix: symbol-keyed reindex for OHLC columns to avoid positional index mismatch across series-filtered DataFrames
+        raw_ohlc = raw.drop_duplicates(subset=['TckrSymb'], keep='first').set_index('TckrSymb')
+        for src, dst in [('OpnPric', 'open_price'), ('HghPric', 'high_price'), ('LwPric', 'low_price')]:
+            if src in raw_ohlc.columns:
+                norm[dst] = pd.to_numeric(raw_ohlc[src].reindex(norm['symbol']).values, errors='coerce')
+        hist[d] = norm.drop_duplicates('symbol', keep='first').set_index('symbol')
+    return hist
+
 def run_picking_for_month(year, month, uni, sec):
     sel_date = get_selection_date(year, month)
     month_str = f"{year}-{month:02d}"
@@ -41,13 +56,13 @@ def run_picking_for_month(year, month, uni, sec):
     ban_set = KNOWN_BAN_MAP.get(sel_date, set())
     print(f"F&O Ban list for {sel_date}: {sorted(list(ban_set)) if ban_set else 'None'}")
 
-    # Load 300 trading days of history up to sel_date
-    print(f"Loading 300 trading days up to {sel_date}...")
-    month_hist = strategy.load_price_history(sel_date, uni, days=300)
+    # Load cached trading days up to sel_date
+    print(f"Loading cached trading days up to {sel_date}...")
+    month_hist = load_cached_price_history(sel_date, num_days=270)
     
     # MANDATORY: back_adjust=True to restate history for corporate actions/splits
-    print("Applying back-adjustment for corporate actions...")
-    month_hist = strategy.adjust_holding_window(month_hist, sorted(month_hist), back_adjust=True)
+    print("Applying back-adjustment for corporate actions (heuristic mode)...")
+    month_hist = strategy.adjust_holding_window(month_hist, sorted(month_hist), back_adjust=True, use_classifier=False)
     dates = sorted(month_hist.keys())
 
     # Build feature table per symbol

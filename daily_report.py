@@ -527,10 +527,27 @@ def render(rpt: Report) -> str:
 
     if rpt.holdings:
         L.append("<b>CONTINUE TO HOLD</b>")
+        # A name below entry gets its exact stop price and how far the
+        # price still has to fall to reach it. The stop is the one fixed
+        # on entry day -- 5% or 10% of the entry price depending on the
+        # breadth regime -- so quoting a percentage would be ambiguous.
+        # Only the rupee level is unambiguous at the broker terminal.
+        losers = []
         for h in sorted(rpt.holdings, key=lambda x: -x.pnl_pct):
             s = "+" if h.pnl_pct >= 0 else ""
-            L.append(f"{esc(h.symbol)}  {_fmt_money(h.last)}  "
-                     f"({s}{h.pnl_pct:.1f}%)")
+            line = f"{esc(h.symbol)}  {_fmt_money(h.last)}  ({s}{h.pnl_pct:.1f}%)"
+            if h.pnl_pct < 0 and h.stop:
+                to_stop = (h.last - h.stop) / h.last * 100 if h.last else 0.0
+                line += (f"  —  SL {_fmt_money(h.stop)}"
+                         f" ({to_stop:.1f}% away)")
+                losers.append(h)
+            L.append(line)
+        if losers:
+            L.append("")
+            L.append("<i>The names above in the red are below your entry. "
+                     "Check a resting stop-loss order is live at the exact "
+                     "price shown against each — it is the level set on "
+                     "entry day and does not move.</i>")
         L.append("")
 
     if rpt.exited_review:

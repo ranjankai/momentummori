@@ -46,6 +46,7 @@ import os
 from dataclasses import dataclass, field
 from datetime import date
 
+import numpy as np
 import pandas as pd
 
 import config
@@ -304,10 +305,118 @@ def render_performance(perf: dict) -> str:
         s2 = "+" if perf["cagr"] >= 0 else ""
         note = ""
         if perf["extrapolated"]:
-            note = (f" (⚠ extrapolated from {perf['n_months']} month(s) — "
+            note = (f" ((!) extrapolated from {perf['n_months']} month(s) — "
                     f"not a track record until 1Y)")
         L.append(f"<b>CAGR: {s2}{perf['cagr']:.1f}%</b>{note}")
     return "\n".join(L).strip()
+
+
+def _compute_stock_entry_band(sym: str, hist: dict, close: float) -> tuple:
+    """
+    Compute dynamic limit entry range (lo, hi, band_pct) for `sym` using
+    recent OHLC daily range / gap volatility from `hist`.
+    """
+    default_b = getattr(config, "ENTRY_BAND_PCT", 2.0) / 100.0
+    if not hist or close <= 0:
+        return close * (1 - default_b), close * (1 + default_b), default_b * 100.0
+
+    lookback = getattr(config, "ENTRY_BAND_LOOKBACK_DAYS", 20)
+    dates = sorted(hist.keys())[-lookback:]
+    ranges, gaps = [], []
+    prev_close = None
+    for d in dates:
+        frame = hist[d]
+        if frame is None or sym not in frame.index:
+            continue
+        row = frame.loc[sym]
+        c = float(row.get("close_price", 0) or 0)
+        h = float(row.get("high_price", 0) or 0)
+        l = float(row.get("low_price", 0) or 0)
+        o = float(row.get("open_price", 0) or 0)
+        if c > 0 and h > 0 and l > 0:
+            ranges.append((h - l) / c)
+        if o > 0 and prev_close and prev_close > 0:
+            gaps.append(abs(o - prev_close) / prev_close)
+        if c > 0:
+            prev_close = c
+
+    if not ranges:
+        return close * (1 - default_b), close * (1 + default_b), default_b * 100.0
+
+    med_range = float(np.median(ranges))
+    med_gap = float(np.median(gaps)) if gaps else 0.0
+    raw_band = max(med_range, med_gap) * 100.0
+    min_b = getattr(config, "ENTRY_BAND_MIN_PCT", 1.5)
+    max_b = getattr(config, "ENTRY_BAND_MAX_PCT", 6.0)
+    band_pct = max(min_b, min(max_b, raw_band))
+    b_frac = band_pct / 100.0
+    return close * (1 - b_frac), close * (1 + b_frac), band_pct
+
+
+def _compute_min_portfolio_sizing(rows: list) -> dict:
+    """
+    Compute minimum total portfolio capital where whole-share purchasing
+    at upper limit entry prices stays within config.ENTRY_MAX_WEIGHT_DEV_PCT
+    (10%) of equal-weight target for every stock.
+    """
+    valid_rows = [r for r in rows if r.get("entry_hi") and r["entry_hi"] > 0]
+    if not valid_rows:
+        return {"min_portfolio": 0, "slot_target": 0, "max_dev_pct": 0.0,
+                "total_invested": 0, "shares": {}}
+
+    slots = getattr(config, "PORTFOLIO_SIZE", 10)
+    max_allowed_dev = getattr(config, "ENTRY_MAX_WEIGHT_DEV_PCT", 10.0) / 100.0
+
+    best = None
+    # Sweep portfolio size from 50,000 to 10,000,000 in steps of 500
+    for p in range(50000, 10000001, 500):
+        slot = p / slots
+        ok = True
+        max_dev = 0.0
+        details = {}
+        for r in valid_rows:
+            px = r["entry_hi"]
+            n = round(slot / px)
+            if n < 1:
+                n = 1
+            actual = n * px
+            dev = abs(actual - slot) / slot
+            max_dev = max(max_dev, dev)
+            if dev > max_allowed_dev:
+                ok = False
+            details[r["symbol"]] = (n, actual, dev)
+        if ok:
+            best = (p, slot, max_dev, details)
+            break
+
+    if not best:
+        p = 5000000
+        slot = p / slots
+        details = {}
+        max_dev = 0.0
+        for r in valid_rows:
+            px = r["entry_hi"]
+            n = max(1, round(slot / px))
+            actual = n * px
+            dev = abs(actual - slot) / slot
+            max_dev = max(max_dev, dev)
+            details[r["symbol"]] = (n, actual, dev)
+        best = (p, slot, max_dev, details)
+
+    portfolio, slot_target, max_dev, details = best
+    shares_map = {}
+    total_invested = 0.0
+    for sym, (n, actual, dev) in details.items():
+        shares_map[sym] = {"shares": n, "invested": actual, "dev_pct": dev * 100.0}
+        total_invested += actual
+
+    return {
+        "min_portfolio": portfolio,
+        "slot_target": slot_target,
+        "max_dev_pct": max_dev * 100.0,
+        "total_invested": total_invested,
+        "shares": shares_map,
+    }
 
 
 def build_entry_sheet(expiry: date, session=None) -> dict:
@@ -329,14 +438,7 @@ def build_entry_sheet(expiry: date, session=None) -> dict:
     kept = decision.symbols
     dropped, added, veto_ran = (decision.veto_dropped, decision.veto_added,
                                 decision.veto_ran)
-    # NOTE: a copy of build()'s off-momentum-judgement and exit-ageing
-    # blocks used to sit here, referencing `rpt`, `merged` and `days` --
-    # none of which exist in this function. `today_frame = merged.get(...)`
-    # is unconditional, so EVERY call raised NameError and the order sheet
-    # could not be produced at all. Removed 03-Aug-2026; those blocks
-    # belong to build() and are still there.
 
-    band = config.ENTRY_BAND_PCT / 100.0
     stop_pct_sheet = decision.stop_pct
     stop = stop_pct_sheet / 100.0
     target = config.V4_TARGET_PCT / 100.0
@@ -362,13 +464,8 @@ def build_entry_sheet(expiry: date, session=None) -> dict:
         close = float(signals.at[sym, "close"]) if sym in signals.index else None
         if close is None or close <= 0:
             continue
-        lo, hi = close * (1 - band), close * (1 + band)
+        lo, hi, band_pct = _compute_stock_entry_band(sym, hist, close)
 
-        # Per-stock LLM targets are OFF (LLM_TARGET_ENABLED = False): they
-        # lost 13pp in the walk-forward. This block used to call
-        # llm_judgment unconditionally without importing it, and referenced
-        # an undefined `universe_stats`, so the order sheet raised NameError
-        # on every run. The live rule is the flat V4_TARGET_PCT.
         if config.LLM_TARGET_ENABLED:
             import llm_judgment
             feat = llm_judgment.build_features(sym, expiry, hist, entry=close,
@@ -384,6 +481,7 @@ def build_entry_sheet(expiry: date, session=None) -> dict:
             "sector": sectors.get(sym, "Unclassified"),
             "close": close,
             "entry_lo": lo, "entry_hi": hi,
+            "entry_band_pct": band_pct,
             "sl_lo": lo * (1 - stop), "sl_hi": hi * (1 - stop),
             "tgt_lo": lo * (1 + target), "tgt_hi": hi * (1 + target),
             "target_pct": tgt["target_pct"],
@@ -397,9 +495,16 @@ def build_entry_sheet(expiry: date, session=None) -> dict:
         h = current[sym]
         sells.append({"symbol": sym, "last": h.last, "pnl_pct": h.pnl_pct})
 
+    sizing = _compute_min_portfolio_sizing(rows)
+    for r in rows:
+        sym_sizing = sizing["shares"].get(r["symbol"], {})
+        r["rec_shares"] = sym_sizing.get("shares", 1)
+        r["rec_invested"] = sym_sizing.get("invested", r["entry_hi"])
+
     return {"expiry": expiry, "rows": rows, "dropped": dropped,
             "veto_ran": veto_ran, "sells": sells, "holds": to_hold,
-            "had_prior_book": bool(current), "stop_pct": stop_pct_sheet}
+            "had_prior_book": bool(current), "stop_pct": stop_pct_sheet,
+            "sizing": sizing}
 
 
 def render_entry_sheet(sheet: dict) -> str:
@@ -409,10 +514,11 @@ def render_entry_sheet(sheet: dict) -> str:
     sells = sheet.get("sells") or []
     holds = sheet.get("holds") or []
     buys = [r for r in rows if r.get("action") != "HOLD"]
+    sizing = sheet.get("sizing") or {}
 
     L = [f"<b>Portfolio for this month</b>",
          f"<i>Basket from the {sheet['expiry']:%d-%m-%y} close — "
-         f"place at the next open</i>",
+         f"place limit orders at the next open</i>",
          ""]
 
     # Exits first: the money has to come out before it can go back in.
@@ -433,17 +539,32 @@ def render_entry_sheet(sheet: dict) -> str:
         L.append("")
 
     if buys:
-        L.append(f"<b>BUY ORDERS - invest {weight:.0f}% in each</b>")
+        L.append(f"<b>LIMIT BUY ORDERS - invest ~{weight:.0f}% in each</b>")
         L.append("")
     for i, r in enumerate(buys, 1):
         L.append(f"<b>{i}. {esc(r['symbol'])}</b>")
-        L.append(f"    Enter at market: {_fmt_money(r['entry_lo'])} – "
+        bp = r.get("entry_band_pct", config.ENTRY_BAND_PCT)
+        L.append(f"    Limit Entry Range (±{bp:.1f}%): {_fmt_money(r['entry_lo'])} – "
                  f"{_fmt_money(r['entry_hi'])}")
+        sh = r.get("rec_shares")
+        if sh:
+            L.append(f"    Rec. Quantity: {sh:,} share{'s' if sh > 1 else ''} "
+                     f"(~{_fmt_money(r.get('rec_invested', 0))})")
         L.append(f"    SL @{sheet.get('stop_pct', config.V4_STOP_LOSS_PCT):.0f}%: "
                  f"{_fmt_money(r['sl_lo'])} – {_fmt_money(r['sl_hi'])}")
         tp = r.get("target_pct", config.V4_TARGET_PCT)
         L.append(f"    Book at +{tp:.0f}%: "
                  f"{_fmt_money(r['tgt_lo'])} – {_fmt_money(r['tgt_hi'])}")
+        L.append("")
+
+    if sizing and sizing.get("min_portfolio"):
+        mp = sizing["min_portfolio"]
+        st = sizing["slot_target"]
+        md = sizing["max_dev_pct"]
+        L.append(f"<b>MINIMUM PORTFOLIO GUIDE</b>")
+        L.append(f"• Recommended Min Portfolio: <b>Rs {mp/100000:.2f} Lakh</b> (Rs {mp:,})")
+        L.append(f"• Slot Target (10%): Rs {st:,.0f} per stock")
+        L.append(f"• Max Allocation Deviation: {md:.1f}% across whole shares")
         L.append("")
 
     if not sheet.get("had_prior_book", True):
@@ -467,7 +588,7 @@ def render_entry_sheet(sheet: dict) -> str:
             L.append(f"  {esc(sym)} — {esc(why)}")
     if not sheet["veto_ran"]:
         L.append("")
-        L.append("<i>⚠ Surveillance check did not run</i>")
+        L.append("<i>(!) Surveillance check did not run</i>")
     return "\n".join(L).strip()
 
 

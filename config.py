@@ -362,6 +362,10 @@ CORP_ACTION_UNKNOWN_POLICY = "heuristic"
 # the next session's open is known, so entry prices are quoted as a band
 # around the signal-day close rather than a single number.
 ENTRY_BAND_PCT = 2.0
+ENTRY_BAND_MIN_PCT = 1.5          # Floor for stock dynamic limit entry band (%)
+ENTRY_BAND_MAX_PCT = 6.0          # Ceiling for stock dynamic limit entry band (%)
+ENTRY_BAND_LOOKBACK_DAYS = 20     # Lookback sessions to compute median daily range/gap
+ENTRY_MAX_WEIGHT_DEV_PCT = 10.0   # Max weight deviation tolerance for equal-weight sizing (%)
 
 # Dynamic price band for F&O scrips: an order more than this far from the
 # previous close is REJECTED by the exchange. Verified 01-Aug-2026: all

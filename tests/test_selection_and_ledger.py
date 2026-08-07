@@ -296,3 +296,70 @@ def test_closed_trades_deduplicates_on_symbol_and_date(monkeypatch):
     trades = ledger.closed_trades()
     assert len(trades) == 2
     assert [t["exit_date"] for t in trades] == ["2026-02-10", "2026-03-11"]
+
+
+def test_compute_stock_entry_band_clamping():
+    import daily_report
+    # Empty history falls back to default
+    lo, hi, bp = daily_report._compute_stock_entry_band("XYZ", {}, 100.0)
+    assert bp == pytest.approx(config.ENTRY_BAND_PCT)
+    assert lo == pytest.approx(98.0)
+    assert hi == pytest.approx(102.0)
+
+
+def test_compute_min_portfolio_sizing():
+    import daily_report
+    rows = [
+        {"symbol": "HIGH_PX", "entry_hi": 30000.0},
+        {"symbol": "MED_PX", "entry_hi": 5000.0},
+        {"symbol": "LOW_PX", "entry_hi": 100.0},
+    ]
+    sizing = daily_report._compute_min_portfolio_sizing(rows)
+    assert sizing["min_portfolio"] > 0
+    assert sizing["max_dev_pct"] <= config.ENTRY_MAX_WEIGHT_DEV_PCT
+    assert sizing["shares"]["HIGH_PX"]["shares"] >= 1
+
+
+def test_render_entry_sheet_includes_limit_orders_and_sizing_guide():
+    import daily_report
+    from datetime import date
+    sheet = {
+        "expiry": date(2026, 7, 28),
+        "stop_pct": 5.0,
+        "rows": [
+            {
+                "symbol": "ACME",
+                "action": "BUY",
+                "close": 100.0,
+                "entry_lo": 97.0,
+                "entry_hi": 103.0,
+                "entry_band_pct": 3.0,
+                "rec_shares": 100,
+                "rec_invested": 10300.0,
+                "sl_lo": 92.15,
+                "sl_hi": 97.85,
+                "tgt_lo": 135.8,
+                "tgt_hi": 144.2,
+                "target_pct": 40.0,
+            }
+        ],
+        "sells": [],
+        "holds": [],
+        "dropped": [],
+        "veto_ran": True,
+        "had_prior_book": True,
+        "sizing": {
+            "min_portfolio": 100000,
+            "slot_target": 10000,
+            "max_dev_pct": 3.0,
+            "total_invested": 10300,
+            "shares": {"ACME": {"shares": 100, "invested": 10300, "dev_pct": 3.0}},
+        },
+    }
+    rendered = daily_report.render_entry_sheet(sheet)
+    assert "LIMIT BUY ORDERS" in rendered
+    assert "Limit Entry Range (±3.0%): 97.00 – 103.00" in rendered
+    assert "Rec. Quantity: 100 shares" in rendered
+    assert "MINIMUM PORTFOLIO GUIDE" in rendered
+    assert "Recommended Min Portfolio:" in rendered
+

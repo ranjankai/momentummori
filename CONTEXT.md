@@ -830,6 +830,19 @@ UNVERIFIED until re-run through `simulate_month`.
 Rule going forward: new backtests call `strategy.simulate_month`. If it
 lacks a parameter, add the parameter -- do not fork the loop.
 
+## Session 04-Aug to 07-Aug-2026 Updates
+
+### 1. Transient NSE 404 Caching Fix (`nse_client.py`)
+- **Problem**: Early daytime runs before NSE published the day's bhavcopy (around 18:00 IST) received HTTP 404 and cached a permanent `.nodata` marker. Subsequent evening runs skipped network fetches, treating valid trading days as non-trading days.
+- **Fix**: Implemented `NODATA_GRACE_DAYS = 4`. `404 Not Found` markers on dates within the grace period are treated as transient (not yet published) and are automatically deleted on subsequent retries rather than poisoning the date permanently.
+
+### 2. Exact Rupee Stop Loss Output in Daily Notes (`daily_report.py`)
+- **Enhancement**: Holdings trading below entry price now display their exact rupee stop loss level and percentage distance in daily alerts (e.g., `IDEA  12.86  (-1.2%)  --  SL 12.37 (3.8% away)`), followed by a directive to verify the resting broker order at that exact price.
+
+### 3. Dynamic Limit Entry Bands & Minimum Portfolio Sizing (`daily_report.py`, `config.py`)
+- **Dynamic Limit Bands**: Entry sheets scale stock limit order entry ranges using 20-day daily price ranges (`_compute_stock_entry_band`), bounded by `ENTRY_BAND_MIN_PCT` (1.5%) and `ENTRY_BAND_MAX_PCT` (6.0%).
+- **Minimum Portfolio Guide**: `render_entry_sheet` includes whole-share quantity recommendations and a Minimum Portfolio Guide (`_compute_min_portfolio_sizing`) to assist users in sizing equal-weighted baskets without severe rounding distortion.
+
 ## Pending Tasks
 
 - **Re-run every 03-Aug comparison through `simulate_month`.** See

@@ -37,6 +37,55 @@ def _serialise(value):
     return value
 
 
+def _append(entry: dict, rendered: str, kind: str) -> bool:
+    """
+    Shared append-only write: one ledger.jsonl line, one notes/*.txt file.
+    Used by both record() (Report-shaped) and record_note() (anything else).
+    """
+    ok = True
+    try:
+        os.makedirs(os.path.dirname(config.LEDGER_FILE), exist_ok=True)
+        with open(config.LEDGER_FILE, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(entry, default=_serialise) + "\n")
+        logger.info("Ledger updated for %s (%s)", entry["as_of"], kind)
+    except OSError as exc:
+        logger.error("Could not append to ledger %s: %s", config.LEDGER_FILE, exc)
+        ok = False
+
+    if rendered:
+        try:
+            os.makedirs(config.LEDGER_ARCHIVE_DIR, exist_ok=True)
+            path = os.path.join(config.LEDGER_ARCHIVE_DIR,
+                                f"{entry['as_of']}_{kind}.txt")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(rendered)
+        except OSError as exc:
+            logger.error("Could not archive note: %s", exc)
+            ok = False
+    return ok
+
+
+def record_note(kind: str, as_of, rendered: str = None, **fields) -> bool:
+    """
+    Append a note that is NOT shaped like a daily_report.Report -- currently
+    the expiry-evening order sheet and performance scorecard, both sent by
+    `run_strategy.py sheet` and previously not recorded anywhere.
+
+    Same guarantee as record(): written before delivery, never rewritten.
+    `fields` is stored as-is (must be JSON-serialisable) so each caller can
+    keep whatever shape is useful to it without record() needing to know.
+    """
+    if not config.LEDGER_ENABLED:
+        return False
+    entry = {
+        "written_at": datetime.now().isoformat(timespec="seconds"),
+        "kind": kind,
+        "as_of": _serialise(as_of),
+    }
+    entry.update({k: _serialise(v) for k, v in fields.items()})
+    return _append(entry, rendered, kind)
+
+
 def record(rpt, rendered: str = None, kind: str = "daily") -> bool:
     """
     Append one run to the ledger. Returns True on success.
@@ -65,7 +114,6 @@ def record(rpt, rendered: str = None, kind: str = "daily") -> bool:
             for e in rpt.exits
         ],
         "sell_orders": list(getattr(rpt, "sell_orders", []) or []),
-        "buy_orders": list(getattr(rpt, "buy_orders", []) or []),
         "holdings": [
             {
                 "symbol": h.symbol,

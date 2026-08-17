@@ -284,33 +284,104 @@ def cmd_sheet(args):
 
     try:
         sheet = daily_report.build_entry_sheet(expiry)
-        text = daily_report.render_entry_sheet(sheet)
+        existing_text = daily_report.render_entry_sheet(sheet)
     except Exception as exc:
         logging.getLogger("momentum_tracker").exception("Entry sheet failed")
         alerts.send_failure(f"entry sheet for {expiry}", exc)
         raise
 
-    # Expiry evening sends TWO messages, in this order:
-    #   1. the running scorecard -- how each month has gone
-    #   2. this sheet -- what to actually place at tomorrow's open
-    # Scorecard first, so the actionable sheet is the last thing on
-    # screen when the phone is opened in the morning.
+    # Expiry evening sends exactly THREE messages, in this order
+    # (15-Aug-2026, explicit instruction -- "Why would there be a 4th
+    # message. There are only 3 messages on expiry day: 1. Performance to
+    # date  2. New Investors  3. Existing investors"):
     import ledger
-    perf_text = daily_report.render_performance(ledger.performance())
+    perf_data = ledger.performance()
+    perf_text = daily_report.render_performance(perf_data)
+
+    # Open the multi-day entry-tracking window over the FULL basket (every
+    # row, not just the fresh buys) -- a new investor needs a fill plan
+    # for EVERY name, including the ones tagged HOLD at the strategy
+    # level (see build_entry_sheet's 'action' tag warning: HOLD there
+    # means "continuing from last cycle's strategy basket", not "already
+    # in this investor's book"). Those HOLD-tagged names are passed as
+    # market_buy_symbols so they skip the 3-stage limit chain and fill at
+    # Day-1's market open instead -- the same entry-price basis an
+    # existing investor's TOP-UP gets (see open_window's and
+    # render_new_investor_day0's docstrings for the full reasoning).
+    # Fresh buys ALSO cover an existing investor's empty slots -- from
+    # Day 1 onward the very same window and the very same entry_tracking.
+    # render() message serve both audiences identically (locked in
+    # earlier this thread: "Yes, this is correct, only Day 0 will be
+    # different for new vs existing. Day 1 will be the same.").
+    import entry_tracking
+    full_basket_symbols = [r["symbol"] for r in sheet["rows"]]
+    market_buy_symbols = [r["symbol"] for r in sheet["rows"] if r.get("action") == "HOLD"]
+    # Per-symbol, not the flat config default -- build_entry_sheet already
+    # resolved each row's own target_pct (LLM-derived when
+    # config.LLM_TARGET_ENABLED, else the flat default per row anyway), so
+    # passing the map keeps the Day-1/2 "Exit: Rs Y" notes in agreement
+    # with the "Book at +X%" figure the Day-0 sheet just showed for that
+    # same symbol (14-Aug-2026 fix -- previously nothing was passed here
+    # and every follow-up note silently used the flat default regardless).
+    target_pct_by_symbol = {r["symbol"]: r.get("target_pct", config.V4_TARGET_PCT)
+                            for r in sheet["rows"]}
+    et_state = entry_tracking.open_window(
+        expiry, full_basket_symbols, stop_pct=sheet.get("stop_pct"),
+        target_pct=target_pct_by_symbol,
+        slot_target=sheet["sizing"].get("slot_target"),
+        market_buy_symbols=market_buy_symbols)
+    new_investor_text = entry_tracking.render_new_investor_day0(et_state)
 
     print(perf_text)
     print()
-    print(text)
+    print(new_investor_text)
+    print()
+    print(existing_text)
+
+    # Record BEFORE sending -- same guarantee as the daily note (the
+    # decision is what matters, delivery is just transport). One record
+    # per message sent.
+    buys = [r["symbol"] for r in sheet["rows"] if r.get("action") != "HOLD"]
+    ledger.record_note("perf", expiry, rendered=perf_text, **perf_data)
+    entry_tracking.record(et_state, new_investor_text)
+    ledger.record_note(
+        "sheet", expiry, rendered=existing_text,
+        sells=[s["symbol"] for s in (sheet.get("sells") or [])],
+        holds=list(sheet.get("holds") or []),
+        buys=buys,
+        stop_pct=sheet.get("stop_pct"),
+        veto_dropped=[list(x) for x in (sheet.get("dropped") or [])],
+        veto_ran=sheet.get("veto_ran"),
+        rebalance=sheet.get("rebalance"),
+    )
+
+    # Apply the book side-effects of tonight's decisions. Both rest on the
+    # same assumption as entry_tracking's fills: the investor is assumed to
+    # follow every recommendation exactly, so the book is updated the
+    # moment the decision is made, not on some later confirmation step
+    # that doesn't exist in this system. (The TOP-UP names get a second,
+    # more precise book.open_position() write on Day 1 once the actual
+    # market-open fill price is known -- harmless double-write, same
+    # target share count either way, just a more accurate entry_price
+    # once real.)
+    import book
+    for s in (sheet.get("sells") or []):
+        book.close_position(s["symbol"])
+    for sym, d in (sheet.get("rebalance") or {}).items():
+        if d.get("status") == "rebalance":
+            book.adjust_shares(sym, d["new_shares"], expiry)
+
     if args.no_send:
-        print("\n(--no-send: neither message delivered)")
+        print("\n(--no-send: no messages delivered)")
         return
 
     ok_perf = alerts.send(perf_text)
-    ok_sheet = alerts.send(text)
-    if not (ok_perf and ok_sheet):
+    ok_new = alerts.send(new_investor_text) if et_state["stocks"] else True
+    ok_existing = alerts.send(existing_text)
+    if not (ok_perf and ok_new and ok_existing):
         print("\nDELIVERY FAILED -- see logs/app.log", file=sys.stderr)
         sys.exit(2)
-    print(f"\nBoth messages delivered to Telegram chat {config.TELEGRAM_CHAT_ID}")
+    print(f"\nAll messages delivered to Telegram chat {config.TELEGRAM_CHAT_ID}")
 
 
 def cmd_daily(args):
@@ -343,6 +414,37 @@ def cmd_daily(args):
               f"tonight, nothing sent here.")
         return
 
+    # Entry-tracking window: for the 1-3 sessions right after an expiry,
+    # the basket isn't necessarily fully bought yet (see entry_tracking.py
+    # -- the V5 multi-day fill chain). While that window is open, THIS
+    # note is replaced by the tracking note, not sent alongside it, per
+    # the agreed design. The evening a session's advance() resolves every
+    # slot (filled or aborted), THAT SAME message already says "Final fill
+    # list" -- there is nothing left to confirm, so mark_final_sent right
+    # away and fall through to the normal note starting the very next
+    # session (15-Aug-2026 fix: previously waited one extra "+1" evening
+    # to repeat an already-final message unchanged -- pure noise once
+    # resolution happens early, e.g. everything filled by Day 2 instead
+    # of needing the Day-3 mandatory stage).
+    import entry_tracking
+    et_state = entry_tracking.load()
+    if et_state is not None and entry_tracking.is_window_active(et_state):
+        et_state = entry_tracking.advance(et_state, as_of)
+        et_text = entry_tracking.render(et_state)
+        print(et_text)
+        entry_tracking.record(et_state, et_text)
+        if et_state["resolved_as_of"] is not None:
+            entry_tracking.mark_final_sent(et_state)
+        if args.no_send:
+            print("\n(--no-send: not delivered)")
+            return
+        if alerts.send(et_text):
+            print(f"\nDelivered to Telegram chat {config.TELEGRAM_CHAT_ID}")
+        else:
+            print("\nDELIVERY FAILED -- see logs/app.log", file=sys.stderr)
+            sys.exit(2)
+        return
+
     # Built incrementally: stored state + one bhavcopy. The basket was
     # decided on expiry day and cannot change until the next one, so
     # re-ranking 208 symbols over 260 days every evening was recomputing a
@@ -365,6 +467,16 @@ def cmd_daily(args):
     # transport. A Telegram outage must not erase the audit trail.
     import ledger
     ledger.record(report, rendered=text, kind="daily")
+
+    # A stop, target, or momentum exit hit TODAY closes the position for
+    # real -- book.py must drop it now, not wait for the next expiry's
+    # SELL pass. Without this, a name that exits mid-month keeps a stale
+    # share count in the book that the next HOLD-rebalance check would
+    # wrongly measure drift against.
+    import book
+    for e in report.exits:
+        if e.exit_date == as_of:
+            book.close_position(e.symbol)
 
     if args.no_send:
         print("\n(--no-send: not delivered)")

@@ -247,6 +247,11 @@ _load_dotenv()
 
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
+# Run-failure alerts only -- deliberately separate from TELEGRAM_CHAT_ID so a
+# broken run never posts to the investor group, only to you. If unset,
+# alerts.admin_recipients() falls back to the first non-group (positive) ID
+# in TELEGRAM_CHAT_ID, so this is never silently unrouted.
+TELEGRAM_ADMIN_CHAT_ID = os.environ.get("TELEGRAM_ADMIN_CHAT_ID", "")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
 

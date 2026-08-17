@@ -1,0 +1,16 @@
+{"month": "2025-09", "baseline_ret": 4.286, "realistic_ret": 2.774, "delta_pts": -1.511, "n_aborted": 0, "aborted": [], "n_filled": 10}
+{"month": "2025-03", "baseline_ret": 4.965, "realistic_ret": 6.017, "delta_pts": 1.052, "n_aborted": 0, "aborted": [], "n_filled": 10}
+{"month": "2025-04", "baseline_ret": 0.814, "realistic_ret": 1.753, "delta_pts": 0.938, "n_aborted": 0, "aborted": [], "n_filled": 10}
+{"month": "2025-05", "baseline_ret": 1.496, "realistic_ret": 1.803, "delta_pts": 0.307, "n_aborted": 0, "aborted": [], "n_filled": 10}
+{"month": "2025-06", "baseline_ret": -3.197, "realistic_ret": -3.74, "delta_pts": -0.543, "n_aborted": 0, "aborted": [], "n_filled": 10}
+{"month": "2025-07", "baseline_ret": -4.252, "realistic_ret": -3.663, "delta_pts": 0.59, "n_aborted": 0, "aborted": [], "n_filled": 10}
+{"month": "2025-08", "baseline_ret": 4.473, "realistic_ret": 4.738, "delta_pts": 0.265, "n_aborted": 0, "aborted": [], "n_filled": 10}
+{"month": "2025-10", "baseline_ret": 2.455, "realistic_ret": 1.998, "delta_pts": -0.457, "n_aborted": 0, "aborted": [], "n_filled": 10}
+{"month": "2025-11", "baseline_ret": 3.383, "realistic_ret": 2.684, "delta_pts": -0.7, "n_aborted": 0, "aborted": [], "n_filled": 10}
+{"month": "2025-12", "baseline_ret": -3.513, "realistic_ret": -3.988, "delta_pts": -0.475, "n_aborted": 0, "aborted": [], "n_filled": 10}
+{"month": "2026-01", "baseline_ret": 13.609, "realistic_ret": 11.778, "delta_pts": -1.831, "n_aborted": 0, "aborted": [], "n_filled": 10}
+{"month": "2026-02", "baseline_ret": -4.019, "realistic_ret": -4.212, "delta_pts": -0.193, "n_aborted": 0, "aborted": [], "n_filled": 10}
+{"month": "2026-03", "baseline_ret": 19.608, "realistic_ret": 21.557, "delta_pts": 1.949, "n_aborted": 0, "aborted": [], "n_filled": 10}
+{"month": "2026-04", "baseline_ret": -0.799, "realistic_ret": 0.445, "delta_pts": 1.245, "n_aborted": 0, "aborted": [], "n_filled": 10}
+{"month": "2026-05", "baseline_ret": -0.305, "realistic_ret": -0.727, "delta_pts": -0.422, "n_aborted": 0, "aborted": [], "n_filled": 10}
+{"month": "2026-06", "baseline_ret": -2.763, "realistic_ret": -2.502, "delta_pts": 0.261, "n_aborted": 0, "aborted": [], "n_filled": 10}

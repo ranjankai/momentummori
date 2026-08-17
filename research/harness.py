@@ -108,13 +108,18 @@ def v4_basket(ex, top_n=10):
 
 
 def run_cycle(picks, ex, nx, stop_pct=None, target_pct=None,
-              price_by_date=None, ranked_order=None, top_n=10):
+              price_by_date=None, ranked_order=None, top_n=10,
+              ratchet_trigger_pct=None, ratchet_lock_pct=None):
     """
     One fresh-start cycle through the production engine.
 
     `picks` seeds the slots; `ranked_order` (defaults to `picks`) is what
     simulate_month walks for replacements, which are off in production
     anyway (V4_REDEPLOY_ENABLED = False).
+
+    `ratchet_trigger_pct`/`ratchet_lock_pct` pass straight through to
+    `strategy.simulate_month` -- see its docstring. Both None (default)
+    reproduces the live engine exactly.
     """
     merged = price_by_date if price_by_date is not None else prices(ex, nx)
     after = [d for d in sorted(merged) if d > nx]
@@ -124,6 +129,8 @@ def run_cycle(picks, ex, nx, stop_pct=None, target_pct=None,
         ranked_order or list(picks), merged, hold, sectors(),
         basket_symbols=list(picks), top_n=top_n,
         stop_pct=stop_pct, target_pct=target_pct,
+        ratchet_trigger_pct=ratchet_trigger_pct,
+        ratchet_lock_pct=ratchet_lock_pct,
         carry_forward=False)          # fresh start, always
 
 

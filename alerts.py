@@ -45,6 +45,22 @@ def recipients() -> list:
     return [c.strip() for c in raw.split(",") if c.strip()]
 
 
+def admin_recipients() -> list:
+    """
+    Chat ID(s) for run-failure alerts ONLY. Never includes a group.
+
+    Prefers TELEGRAM_ADMIN_CHAT_ID. If that is unset, falls back to the
+    first non-group ID in TELEGRAM_CHAT_ID (group IDs are negative -- see
+    recipients()) so a missing .env entry degrades to "still reaches you"
+    rather than "silently drops" or "goes to the group by accident".
+    """
+    raw = str(getattr(config, "TELEGRAM_ADMIN_CHAT_ID", "") or "")
+    ids = [c.strip() for c in raw.split(",") if c.strip()]
+    if ids:
+        return ids
+    return [c for c in recipients() if not c.startswith("-")][:1]
+
+
 def _configured() -> tuple:
     """(ok, reason). Never raises."""
     if not config.ALERTS_ENABLED:
@@ -96,11 +112,14 @@ def _migrated_chat_id(resp):
         return None
 
 
-def send(text: str) -> bool:
+def send(text: str, chat_ids: list = None) -> bool:
     """
-    Deliver `text` to the configured chat. Returns True only if EVERY
+    Deliver `text` to the configured chat(s). Returns True only if EVERY
     chunk was accepted. Retries with the same exponential backoff the NSE
     client uses (2s, 4s, 8s).
+
+    `chat_ids` overrides the default (all of TELEGRAM_CHAT_ID) -- used by
+    send_failure() to route run failures to admin_recipients() only.
     """
     ok, reason = _configured()
     if not ok:
@@ -110,7 +129,10 @@ def send(text: str) -> bool:
     url = config.TELEGRAM_API_URL.format(
         token=config.TELEGRAM_BOT_TOKEN, method="sendMessage")
     parts = _chunks(text, config.ALERT_MAX_CHARS)
-    chats = recipients()
+    chats = chat_ids if chat_ids is not None else recipients()
+    if not chats:
+        logger.warning("Alert not sent: no recipients")
+        return False
     all_ok = True
 
     for chat_id in chats:
@@ -182,14 +204,26 @@ def send_failure(context: str, exc: BaseException) -> bool:
     """
     Report a failed run. Without this, a broken fetch and a quiet market
     look identical from your phone -- both are silence.
+
+    Admin-only, deliberately: this is an internal ops signal ("something
+    broke, go check logs/app.log"), not an investor-facing message, and
+    must never land in the group. Every failure path in the codebase goes
+    through this one function, so this is the single choke point -- no
+    other file needs to know about admin vs. group routing.
     """
     if not config.ALERT_ON_FAILURE:
+        return False
+    admins = admin_recipients()
+    if not admins:
+        logger.error("Run failed (stage=%s: %s: %s) but no admin recipient "
+                     "is configured -- set TELEGRAM_ADMIN_CHAT_ID in .env",
+                     context, type(exc).__name__, str(exc)[:200])
         return False
     body = (f"<b>⚠ Momentum Tracker run failed</b>\n\n"
             f"<b>Stage:</b> {esc(context)}\n"
             f"<b>Error:</b> {esc(type(exc).__name__)}: {esc(str(exc)[:400])}\n\n"
             f"No basket was generated. Check logs/app.log.")
-    return send(body)
+    return send(body, chat_ids=admins)
 
 
 def esc(value) -> str:

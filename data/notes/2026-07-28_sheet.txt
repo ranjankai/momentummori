@@ -1,0 +1,10 @@
+[TEST ARTIFACT -- NOT A REAL SENT MESSAGE]
+This file was created by an isolated `--no-send` dry run on 2026-08-15 while
+wiring the new-investor/existing-investor message redesign, run against real
+2026-07-28 data but with today's (2026-08-15) live ASM veto snapshot and an
+empty test book, not what actually shipped on the real expiry evening (no
+`sheet`/`entry_tracking` ledger record exists for 2026-07-28, confirming
+cmd_sheet never actually ran that day -- the cycle appears to have opened via
+cycle_state's own fallback path instead). Left in place only because this
+sandbox cannot delete files on this mount; do not treat this as an audit
+record of what was sent to investors.

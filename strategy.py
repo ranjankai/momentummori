@@ -261,7 +261,7 @@ def _explain_breach(symbol, day, prev_close, close, observed, hard):
 def adjust_holding_window(price_by_date, hold_dates, symbols=None,
                           low=0.72, high=1.40, back_adjust=False,
                           grey_low=0.85, grey_high=1.18, use_classifier=None,
-                          classify_symbols=None):
+                          classify_symbols=None, return_factors=False):
     """
     Neutralise unadjusted corporate actions across the HOLDING window.
 
@@ -279,6 +279,18 @@ def adjust_holding_window(price_by_date, hold_dates, symbols=None,
     Returns the original dict untouched when nothing breaches, which is
     the overwhelmingly common case, so the cost is one close-series scan.
     Only breaching symbols on affected dates are copied.
+
+    `return_factors=True` additionally returns {symbol: final_factor} --
+    the cumulative price multiplier this call applied to that symbol by
+    the LAST date in the window (1.0 for anything untouched). A caller
+    that tracks whole share counts OUTSIDE this function's own adjusted
+    price series (research/carry_forward_v5.py's book ledger -- real
+    money, real tradeable shares) needs this: `factor` is exactly the
+    ratio a real share count must be multiplied by across the same
+    action to stay value-consistent with RAW, unadjusted market prices
+    (a 3:1 split triples the factor here and must triple the share
+    count there). Added 14-Aug-2026 -- found via BSE's 23-May-2025 split
+    producing a ~3x-overstated whole-share valuation in that ledger.
     """
     # OFF by default, deliberately. The hard band needs no network and is
     # what protects against a split; the classifier only adds precision in
@@ -292,7 +304,7 @@ def adjust_holding_window(price_by_date, hold_dates, symbols=None,
 
     dates = [d for d in hold_dates if d in price_by_date]
     if len(dates) < 2:
-        return price_by_date
+        return (price_by_date, {}) if return_factors else price_by_date
 
     syms = symbols
     if syms is None:
@@ -345,7 +357,15 @@ def adjust_holding_window(price_by_date, hold_dates, symbols=None,
             factors[sym] = per_date
 
     if not factors:
-        return price_by_date
+        return (price_by_date, {}) if return_factors else price_by_date
+
+    # Snapshot BEFORE the back_adjust/filtering branches below reshape
+    # `factors` -- this is the true cumulative multiplier applied to each
+    # touched symbol over the whole window, independent of which basis
+    # the returned PRICE series ends up rebased to.
+    final_factors = {sym: per_date.get(dates[-1], 1.0)
+                     for sym, per_date in factors.items()}
+    final_factors = {s: f for s, f in final_factors.items() if f != 1.0}
 
     if back_adjust:
         # Forward-scaling restates everything onto the OLDEST basis, right
@@ -361,13 +381,13 @@ def adjust_holding_window(price_by_date, hold_dates, symbols=None,
                 rebased[sym] = scaled
         factors = rebased
         if not factors:
-            return price_by_date
+            return (price_by_date, final_factors) if return_factors else price_by_date
     else:
         factors = {s: {d: f for d, f in p.items() if f != 1.0}
                    for s, p in factors.items()}
         factors = {s: p for s, p in factors.items() if p}
         if not factors:
-            return price_by_date
+            return (price_by_date, final_factors) if return_factors else price_by_date
 
     logger.warning("Corporate-action adjustment applied over the holding "
                    "window for: %s", ", ".join(sorted(factors)))
@@ -389,7 +409,7 @@ def adjust_holding_window(price_by_date, hold_dates, symbols=None,
                 if col in frame.columns and pd.notna(frame.at[sym, col]):
                     frame.at[sym, col] = float(frame.at[sym, col]) * f
         out[d] = frame
-    return out
+    return (out, final_factors) if return_factors else out
 
 
 def split_adjust(closes: list, symbol: str = None, dates: list = None,
@@ -742,6 +762,15 @@ class MonthResult:
     exits: list = field(default_factory=list)
     to_buy: list = field(default_factory=list)
     empty_slots: int = 0
+    # {symbol: cumulative_price_factor} for any split/bonus detected over
+    # this call's hold_dates (see adjust_holding_window's return_factors).
+    # A real, whole-share ledger tracking share counts OUTSIDE this
+    # function's own adjusted price series (e.g.
+    # research/carry_forward_v5.py's book, or a live brokerage book) must
+    # multiply its share count for that symbol by this same factor to
+    # stay value-consistent -- this function only adjusts PRICES, it
+    # never touches a share count because it doesn't track one.
+    corp_action_factors: dict = field(default_factory=dict)
 
 
 def basket_for(expiry: date, symbols=None, sector_map=None, session=None,
@@ -820,9 +849,25 @@ def simulate_month(ranked_order, price_by_date, hold_dates, sector_map,
                    carry_in: dict = None, basket_symbols=None,
                    carry_forward: bool = None,
                    candidate_fn=None,
-                   use_classifier: bool = None) -> MonthResult:
+                   use_classifier: bool = None,
+                   entry_overrides: dict = None,
+                   ratchet_trigger_pct: float = None,
+                   ratchet_lock_pct: float = None) -> MonthResult:
     """
     Day-by-day simulation of `top_n` equally weighted slots.
+
+    `entry_overrides` ({symbol: (price, date, risk_anchor) | None})
+    replaces the default "fills at hold_dates[0]'s open" assumption for
+    this month's INITIAL entries -- used to backtest a realistic
+    multi-day limit-then-market fill chain (day-1 limit, day-2 requote,
+    day-3 forced market) instead of perfect same-day execution.
+    `risk_anchor` decouples stop/target from wherever the fill actually
+    happened -- see open_position's docstring for why. A value of None
+    means the entry was deliberately ABORTED (gap risk already breached
+    the anchor stop before a fill was reached) and the slot stays in
+    cash for the month, no fallback fill. A symbol absent from the dict
+    still fills the old way. Every existing caller passes nothing and
+    gets identical behaviour to before this parameter existed.
 
     All slots advance through the calendar in lockstep. This matters: an
     earlier implementation ran each slot's full chain to month-end before
@@ -835,6 +880,20 @@ def simulate_month(ranked_order, price_by_date, hold_dates, sector_map,
     freed by an exit is refilled at the NEXT session's open -- never the
     same day, since you cannot know at 09:15 that a stop will trigger at
     14:00.
+
+    RATCHET (`ratchet_trigger_pct`, `ratchet_lock_pct`), both None by
+    default -- every existing caller is unaffected. When set, the ORIGINAL
+    stop_pct/target_pct are left exactly as they are (no conviction tiers,
+    no promotion gate -- see the 03-Aug-2026 ATR-SOP experiment in
+    CONTEXT.md for why that combined design is not reused here). The only
+    change: once a session's HIGH reaches entry*(1+ratchet_trigger_pct/100),
+    the stop is raised (never lowered) to entry*(1+ratchet_lock_pct/100)
+    for every subsequent session. The raise takes effect starting the
+    NEXT session, not the one that triggered it -- the low that would
+    check today's OLD stop and the high that triggers the ratchet are
+    both intraday and unordered, so applying the new stop retroactively
+    on the same day would be look-ahead, the same reasoning the STOP/
+    TARGET gap-fill comment above already applies to entry order.
 
     CROSS-MONTH REBALANCING (carry_forward, "v5"):
     `carry_in` is {symbol: Position} handed back as `.carry` from the
@@ -878,11 +937,12 @@ def simulate_month(ranked_order, price_by_date, hold_dates, sector_map,
     # in stocks we do not own (IVZINNIFTY, NARMADA on 03-Aug-2026) --
     # wasted work, and a warning that trains you to ignore warnings.
     _held = set(basket_symbols or []) | set((carry_in or {}).keys())
-    price_by_date = adjust_holding_window(
+    price_by_date, corp_action_factors = adjust_holding_window(
         price_by_date, hold_dates,
         symbols=sorted(_held) or None,
         classify_symbols=_held or None,
-        use_classifier=use_classifier)
+        use_classifier=use_classifier,
+        return_factors=True)
 
     held = {i: None for i in range(top_n)}
     sector_count, banned, pending = {}, set(), []
@@ -931,11 +991,23 @@ def simulate_month(ranked_order, price_by_date, hold_dates, sector_map,
             return False
         return True
 
-    def open_position(slot, sym, day, basis=None, basis_date=None):
+    def open_position(slot, sym, day, basis=None, basis_date=None, risk_anchor=None):
+        """
+        `risk_anchor`, if given, is the price stop/target are computed
+        from -- separate from `basis`, the actual cost basis P&L is
+        measured against. Per Perold's arrival-price principle: risk
+        parameters should be pinned to the price at the moment the
+        decision became actionable, not to wherever a delayed fill
+        actually happened, or a slow fill inherits a stop that's crept
+        upward (closer to the market) purely as an artefact of the
+        entry being late -- exactly what caused the PNBHOUSING/BSE
+        blowups in the fill-realism backtest.
+        """
         if basis is not None:
+            anchor = risk_anchor if risk_anchor is not None else basis
             held[slot] = Position(sym, float(basis),
-                                  float(basis) * (1 - stop_pct / 100),
-                                  float(basis) * (1 + target_pct / 100),
+                                  float(anchor) * (1 - stop_pct / 100),
+                                  float(anchor) * (1 + target_pct / 100),
                                   basis_date)
             sector_count[sector_of(sym)] = sector_count.get(sector_of(sym), 0) + 1
             return True
@@ -955,50 +1027,102 @@ def simulate_month(ranked_order, price_by_date, hold_dates, sector_map,
     frame0 = price_by_date.get(first)
     basket_set = (set(basket_symbols) if basket_symbols is not None
                   else set(ranked_order[:top_n]))
-    slot = 0
+    # A pool of unclaimed slot indices, not a monotonic counter. FIXED
+    # 13-Aug-2026: the old counter treated "assigned a slot number" as
+    # permanent even for a ROLLOVER sell, whose slot is never actually
+    # occupied (held[slot] is never set -- redeployment is off by
+    # default, so nothing fills it). That silently starved the
+    # entry_overrides fill loop below of slot numbers in any month with
+    # enough simultaneous rollovers: 2 holds + 4 rollovers consumed 6 of
+    # 10 slot numbers before a single fresh buy was attempted, so the
+    # last 4 of 8 needed buys were dropped with no exit, no position, no
+    # error -- found backtesting the carry-forward HOLD-rebalance
+    # mechanism (research/carry_forward_v5.py), where it silently erased
+    # ~4 slots' worth of capital from one month's NAV.
+    free_slots = list(range(top_n))
 
     if carry_forward and carry_in:
         # Re-slot carried positions that are still in this month's basket --
         # no trade, no new cost basis.
         for sym, pos in carry_in.items():
-            if slot >= top_n:
+            if not free_slots:
                 break
             if sym in basket_set and available(sym):
+                slot = free_slots.pop(0)
                 open_position(slot, sym, first, basis=pos.entry, basis_date=pos.entry_date)
-                slot += 1
 
         # Everything else that was open is sold at today's open (a real
-        # trade, tagged ROLLOVER so it's distinguishable from STOP/TARGET),
-        # then its slot is queued for next-session redeployment.
+        # trade, tagged ROLLOVER so it's distinguishable from STOP/TARGET).
+        # held[] is never set for this slot, so it goes straight back to
+        # free_slots -- reusable by THIS month's fill loop below, not just
+        # a future redeploy -- unless a same-month redeploy candidate
+        # actually claims it (only possible when V4_REDEPLOY_ENABLED).
         for sym, pos in carry_in.items():
             if sym in basket_set:
                 continue
-            if slot >= top_n:
-                break
             if frame0 is None or sym not in frame0.index:
                 continue
             px_open = frame0.at[sym, "open_price"]
             if pd.isna(px_open) or px_open <= 0:
                 continue
+            use_slot = free_slots.pop(0) if free_slots else 0
             ret = (float(px_open) - pos.entry) / pos.entry * 100
-            use_slot = slot
-            slot += 1
             pnl[use_slot] += ret
             trades += 1
             chains[use_slot].append((sym, round(ret, 2), "ROLLOVER", str(first)))
             exits.append(Exit(sym, pos.entry, float(px_open), "ROLLOVER", first))
             if policy != "always":
                 banned.add(sym)
+            if use_slot not in free_slots:
+                free_slots.insert(0, use_slot)
             cand = next_candidate([s for _, s in pending])
             if cand:
                 pending.append((use_slot, cand))
+                if use_slot in free_slots:
+                    free_slots.remove(use_slot)
 
     # Fill whatever slots are still empty, same as a no-carry month.
+    # A symbol with an entry_overrides date later than `first` isn't
+    # opened yet -- it's queued in `deferred` so the day-by-day loop
+    # below opens it (at its REAL fill price) on the day it actually
+    # filled, and stop/target checks correctly skip it until then
+    # (held[slot] stays None, same as any other empty slot).
+    #
+    # entry_overrides[sym] can be:
+    #   (price, date, risk_anchor)  -- fills at `price` on `date`, stop/
+    #                                  target computed off `risk_anchor`
+    #   None                        -- ABORTED: gap risk breached the
+    #                                  anchor stop before a fill was
+    #                                  ever reached, so the slot is
+    #                                  deliberately left empty (cash)
+    #                                  for the rest of the month, never
+    #                                  falling back to an auto-fill.
+    #   absent from the dict        -- no override; normal auto-fill at
+    #                                  `first`'s open, as before.
+    deferred = {}
+    has_overrides = entry_overrides is not None
     for sym in ranked_order:
-        if slot >= top_n:
+        if not free_slots:
             break
-        if available(sym) and open_position(slot, sym, first):
-            slot += 1
+        if not available(sym):
+            continue
+        if has_overrides and sym in entry_overrides:
+            override = entry_overrides[sym]
+            if override is None:
+                continue          # aborted -- slot stays empty, no backfill
+            px, dte, anchor = override
+            slot = free_slots.pop(0)
+            if dte == first:
+                if not open_position(slot, sym, first, basis=px, basis_date=first,
+                                     risk_anchor=anchor):
+                    free_slots.insert(0, slot)
+            else:
+                deferred.setdefault(dte, []).append((slot, sym, px, anchor))
+                sector_count[sector_of(sym)] = sector_count.get(sector_of(sym), 0) + 1
+        else:
+            slot = free_slots.pop(0)
+            if not open_position(slot, sym, first):
+                free_slots.insert(0, slot)
 
     for i in range(1, len(hold_dates)):
         day = hold_dates[i]
@@ -1006,6 +1130,8 @@ def simulate_month(ranked_order, price_by_date, hold_dates, sector_map,
             if available(sym):
                 open_position(slot_id, sym, day)
         pending = []
+        for slot_id, sym, px, anchor in deferred.pop(day, []):
+            open_position(slot_id, sym, day, basis=px, basis_date=day, risk_anchor=anchor)
 
         frame = price_by_date.get(day)
         if frame is None:
@@ -1034,6 +1160,11 @@ def simulate_month(ranked_order, price_by_date, hold_dates, sector_map,
                 if opn is not None and pd.notna(opn) and float(opn) > pos.target:
                     exit_px = float(opn)
             if exit_px is None:
+                if (ratchet_trigger_pct is not None and pd.notna(high)
+                        and float(high) >= pos.entry * (1 + ratchet_trigger_pct / 100)):
+                    new_stop = pos.entry * (1 + ratchet_lock_pct / 100)
+                    if new_stop > pos.stop:
+                        pos.stop = new_stop
                 continue
 
             ret = (exit_px - pos.entry) / pos.entry * 100
@@ -1070,24 +1201,33 @@ def simulate_month(ranked_order, price_by_date, hold_dates, sector_map,
     to_buy = [sym for _, sym in pending]
     carry_out = {}
     if carry_forward:
-        # Mark still-open positions to the close -- nothing is actually
-        # sold, so this is not a trade and does not touch `trades`. The
-        # resulting basis is handed back so next month's call can decide
-        # HOLD vs SELL against the new basket.
+        # Mark still-open positions to `final`'s OPEN, not its close.
+        # `final` (hold_dates[-1]) IS next month's own Day-1 -- the same
+        # calendar day a fresh buy there anchors to that day's open
+        # (Perold arrival-price rule, see open_position's docstring). A
+        # carried hold marked to the CLOSE instead (an earlier version's
+        # behaviour, found 14-Aug-2026 when a HOLD's refreshed entry
+        # didn't line up with what a fresh buy that same day would have
+        # used) sits its stop/target one session's worth of drift ahead
+        # of every fresh buy's, for no reason -- same day, two different
+        # reference clocks. Nothing is actually sold here, so this is not
+        # a trade and does not touch `trades`. The resulting basis is
+        # handed back so next month's call can decide HOLD vs SELL
+        # against the new basket.
         for slot_id in range(top_n):
             pos = held.get(slot_id)
             if pos is None or frame is None or pos.symbol not in frame.index:
                 continue
-            px_close = frame.at[pos.symbol, "close_price"]
-            if pd.isna(px_close) or px_close <= 0:
+            px_open = frame.at[pos.symbol, "open_price"]
+            if pd.isna(px_open) or px_open <= 0:
                 continue
-            ret = (float(px_close) - pos.entry) / pos.entry * 100
+            ret = (float(px_open) - pos.entry) / pos.entry * 100
             pnl[slot_id] += ret
             chains[slot_id].append((pos.symbol, round(ret, 2), "MARK", str(final)))
             carry_out[pos.symbol] = Position(
-                pos.symbol, float(px_close),
-                float(px_close) * (1 - stop_pct / 100),
-                float(px_close) * (1 + target_pct / 100), final)
+                pos.symbol, float(px_open),
+                float(px_open) * (1 - stop_pct / 100),
+                float(px_open) * (1 + target_pct / 100), final)
     else:
         # Pre-v5 behaviour: force-sell everything at the final day's open.
         for slot_id in range(top_n):
@@ -1114,4 +1254,5 @@ def simulate_month(ranked_order, price_by_date, hold_dates, sector_map,
         exits=exits,
         to_buy=to_buy,
         empty_slots=top_n - len(open_positions) - len(to_buy),
+        corp_action_factors=corp_action_factors,
     )

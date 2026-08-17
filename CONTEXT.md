@@ -843,7 +843,211 @@ lacks a parameter, add the parameter -- do not fork the loop.
 - **Dynamic Limit Bands**: Entry sheets scale stock limit order entry ranges using 20-day daily price ranges (`_compute_stock_entry_band`), bounded by `ENTRY_BAND_MIN_PCT` (1.5%) and `ENTRY_BAND_MAX_PCT` (6.0%).
 - **Minimum Portfolio Guide**: `render_entry_sheet` includes whole-share quantity recommendations and a Minimum Portfolio Guide (`_compute_min_portfolio_sizing`) to assist users in sizing equal-weighted baskets without severe rounding distortion.
 
+## Session 08-Aug to 15-Aug-2026 — carry-forward redesign, 3-stage fills restored, message split
+
+Large session covering the whole carry-forward/rebalance redesign and a
+full rewrite of the expiry-evening Telegram messages. Full derivations,
+concrete before/after numbers, and validation runs live in
+`BACKTEST_LOG.md` (new file this session) — this section is the map, not
+the detail.
+
+### 1. Corporate-action fix in the carry-forward backtest
+`strategy.adjust_holding_window` gained `return_factors=True`, exposed
+through `simulate_month` as `MonthResult.corp_action_factors`.
+`research/carry_forward_v5.py`'s whole-share book ledger applies the
+factor to real share counts on a split/bonus (the missed 2025-05-23 BSE
+split was the trigger) and switched to RAW (unadjusted) prices for
+valuation. See `BACKTEST_LOG.md` for the fix and the two-pass correction
+needed after the first attempt over-corrected price alongside shares.
+
+### 2. Coverage-scale + never-sell-holds redesign (the core rebuild)
+Explicit instruction: a HELD name is never sold to bring its weight down
+— only a genuine stop/target/rollover exit sells it. New slot-target
+algorithm, implemented identically in the research script and in
+production (`daily_report.py`'s `build_entry_sheet`/
+`_compute_hold_rebalance`):
+1. Build a fresh min-basket exactly as a brand-new investor gets.
+2. Coverage-scale `k = max(held_shares / that_basket's_own_share_count)`
+   over every hold, using the RATIO not the raw share count.
+3. Buy-feasibility floor, generalised to ALL names (not just fresh buys):
+   `slot_target = max(scaled_slot, max(entry_lo for every row))`.
+4. Resolve whole shares for the FULL basket against that slot.
+5. A HOLD needing more shares gets an unconditional Day-1 MARKET top-up
+   (no limit chase, no gap-abort — a top-up isn't new exposure).
+
+`book.py` (new file) persists real per-symbol share counts across
+months — the piece that made "currently held N, target M" comparisons
+possible at all; before this nothing survived a position past its first
+month.
+
+### 3. "v6" self-contained monthly P&L + New-investor basket
+Monthly return = this-cycle-only booked P&L (exit proceeds + month-end
+mark of continuing holds, minus this-cycle's own entry cost: holds at
+real Day-1 price, fresh buys at real fill price) / this-cycle's min
+basket. Deliberately NOT NAV-differenced against the prior month.
+New-investor basket = Existing's real per-symbol shares scaled by
+`1 / min_shares_in_existing`, `max(1, round(shares*scale))` per symbol —
+this is what gives New and Existing the *same per-symbol entry-price
+basis*, which matters for the message design below.
+
+### 4. entry_tracking.py: 3-stage fill mechanism, restored
+A 2-stage collapse (Day-1 limit / Day-2 mandatory) went in and out the
+same evening (13/14-Aug) without actually being agreed — reverted back
+to the original, validated 3-stage design:
+- **Day 1**: 20-day vol-band LIMIT, whole-share sizing off the priciest
+  name's own band-low × N slots.
+- **Day 2** (Day-1 misses only): a NEW limit, re-priced off Day-1's own
+  realized volatility (80%-probability Parkinson estimate). Still a real
+  limit order, NOT mandatory yet.
+- **Day 3** (Day-2 misses only): pools Day-1+Day-2 vol, decides share
+  count the evening before, executes unconditionally at Day-3's actual
+  open — the basket must be complete.
+- Risk anchor (stop/target) is always Day-1's actual open, regardless of
+  which stage actually fills. Gap-risk abort checked before each stage.
+- `render()` splits "still open" into `pending_limit` (a real order to
+  place) vs `pending_mandatory` (informational only, fills automatically)
+  — conflating the two under one "MANDATORY" header was the 2-stage
+  version's actual bug.
+
+**Continuing (HOLD-tagged) names get a `market_buy` flag** through
+`open_window(..., market_buy_symbols=...)`: they skip the whole 3-stage
+chain and fill unconditionally at Day-1's market open, same as an
+existing investor's top-up — needed so a NEW investor's entry price on
+those names sits on the same basis as an existing investor's (explicit
+instruction, 15-Aug-2026).
+
+**Day-3→Stream-2 cutover fix**: previously waited one extra "+1" evening
+after resolution to repeat an already-final message unchanged (noise
+when everything resolved early, e.g. by Day 2). `cmd_daily` now marks
+`final_sent` the SAME evening `resolved_as_of` gets set, so the normal
+daily note (`cycle_state`/Stream 2) resumes the very next session,
+whichever day resolution actually landed on — verified both for an
+early (Day-2) and a full (Day-3 mandatory) resolution.
+
+### 5. Three expiry-evening messages, redesigned and wired into `cmd_sheet`
+Exactly 3 messages, in order (explicit instruction — earlier drafts
+wrongly assumed a 4th):
+1. **Performance scorecard** (`render_performance`, unchanged).
+2. **New-investor message** (`entry_tracking.render_new_investor_day0`,
+   new) — numbered list, "INR"-prefixed, every slot a fresh entry
+   (HOLD-tagged names print as "@ market open" and are listed last, not
+   inline). Opened over the FULL basket with `market_buy_symbols` set to
+   the HOLD-tagged names.
+3. **Existing-investor message** (`daily_report.render_entry_sheet`,
+   rewritten) — same numbered/INR style, SELL → TOP-UP → BUY in one
+   continuous numbering, SL/Exit line placed before TOP-UP (not SELL,
+   which doesn't carry one), no P&L on SELL lines (the scorecard already
+   covers that), no per-stock dev%, no "MINIMUM PORTFOLIO GUIDE" bullet
+   block, no SL-placement/target-band reminder text, no "Surveillance
+   check did not run" line (internal detail, not investor-facing).
+   Header: `Entry portfolio for <Mon>-<Mon> '<YY> - Existing investors`.
+4. Day 1 onward is IDENTICAL for both audiences — one shared
+   `entry_tracking.render()`, header changed to
+   `<StartMonth>-<EndMon> '<YY> PORTFOLIO - <date>`. Verified this
+   degrades correctly (no crash, numerically identical BUY lists) in the
+   no-held-stocks case, where `k` naturally defaults to `1.0`.
+
+All of the above verified end-to-end by calling the real `cmd_sheet`/
+`cmd_daily` functions (not reimplementations) against isolated `/tmp`
+paths for `book.BOOK_FILE`, `entry_tracking.STATE_FILE`,
+`config.LEDGER_FILE`/`LEDGER_ARCHIVE_DIR` — 58/58 unit tests pass.
+
+### Incident: production data touched by a dry-run test (15-Aug-2026)
+A `run_strategy.py sheet --no-send` verification run was executed
+against the REAL `data/` paths instead of isolated ones. `--no-send`
+only blocks Telegram delivery — it still writes `data/entry_tracking.
+json`, appends to `data/ledger.jsonl`, and writes `data/notes/*.txt`.
+Real `data/entry_tracking.json` got overwritten with fake pending state
+(`resolved_as_of: null, final_sent: false`), which would have made the
+next real scheduled run wrongly re-open Stream 1. Fixed by reconstructing
+the file from the untouched `data/cycle_state.json` (real entry prices,
+all filled Day 1, `final_sent: true`) and verifying `is_window_active()`
+returns `False` again. 3 stray `ledger.jsonl` lines removed (confirmed
+via `written_at` timestamp — the file is append-only, so this was a safe
+truncation, not a rewrite). 3 new `data/notes/2026-07-28_*.txt` files
+couldn't be deleted (this sandbox cannot unlink files on this mount) so
+were overwritten with an explicit "TEST ARTIFACT" disclaimer instead.
+`data/book.json` and `data/cycle_state.json` were never touched.
+**Lesson: `--no-send` is not a safe flag for dry-running against real
+data — it only suppresses delivery, not the file writes. Use isolated
+paths for every one of `book.BOOK_FILE`, `entry_tracking.STATE_FILE`,
+`cycle_state.STATE_FILE`, `config.LEDGER_FILE`/`LEDGER_ARCHIVE_DIR`
+before invoking any real CLI command against test data.**
+
+## Session 17-Aug-2026 — isolated exit-ratchet test, also rejected
+
+Follow-up to the 03-Aug-2026 ATR conviction SOP rejection above. That
+test confounded three things (conviction-tiered ATR stops, a promotion
+gate, and a ratchet) and lost -15.36pp; it was never a clean test of the
+simplest version of the idea: keep the live 5%(regime)/40% stop and
+target exactly as they are, and ONLY add a ratchet -- once a session's
+HIGH reaches entry+trigger%, raise the stop (never lower it) to
+entry+lock%, nothing else touched.
+
+Implemented as two new optional params on `strategy.simulate_month`
+(`ratchet_trigger_pct`, `ratchet_lock_pct`, both `None` by default --
+every existing caller, including production, is byte-for-byte
+unaffected) and a matching pass-through on `research/harness.run_cycle`.
+Swept 9 trigger/lock combinations (15/0, 15/5, 20/0, 20/8, 20/12, 25/10,
+25/15, 30/15, 30/20) across the same canonical 13 cycles (Mar-2025 ..
+Mar-2026), classifier OFF for determinism -- the classifier-OFF baseline
+reproduced the canonical classifier-ON +39.57% exactly, so the sweep is
+directly comparable, no caveat needed. See
+`research/exit_ratchet_experiment.py`.
+
+**Result: no configuration beat the unmodified baseline.** Configs where
+the ratchet never actually fired (trigger ≥20% with a large enough lock)
+matched +39.57% exactly, by definition. Every config where it DID fire
+came in lower — as low as +34.38% (20% trigger / 12% lock). The worst
+month also got WORSE, not better, in every config that fired (Feb-2026
+went from -4.02% to -5.44% at 15%-trigger/breakeven-lock) — the direct
+opposite of the "temper the losses" hypothesis this was testing.
+
+**Mechanism, isolated with a concrete example (NATIONALUM, Feb-2026
+cycle):** entered at 347.00, ran up past +15% intraday at some point,
+never came close to threatening the original -5% stop, and was still
+open at month-end, marked to 399.45 (+15.12%) in the baseline — a
+perfectly good, unrealised-but-real month. With a 15%-trigger/breakeven
+ratchet, the stop got raised to 347.00 the session after it crossed
++15%, the stock then drifted back down through breakeven on 23-Mar and
+got stopped there at exactly 0%. The ratchet did not save this position
+from a crash — there wasn't one — it just cashed out a stock that was
+still going to be fine, and because `V4_REDEPLOY_ENABLED` is `False` in
+production, the freed slot then sat in cash for the rest of the month
+instead of earning the +15.12% it would otherwise have kept. That is the
+whole effect, repeated across every case the ratchet fired: **an early
+exit only pays off if the alternative was a stop-out at a WORSE price
+than the ratchet level, and in this basket, positions that pulled back
+after a run mostly kept drifting rather than crashing — so the ratchet's
+"protection" was hardly ever needed, and its cost (giving up the
+remaining drift, then earning nothing on the freed capital) was paid
+every time regardless.**
+
+This is a NEGATIVE result, consistent with the 03-Aug-2026 finding, now
+shown to hold even with the confounds removed. Not pursuing a
+trailing/ratchet exit further unless `V4_REDEPLOY_ENABLED` changes (an
+early exit into a live redeploy, rather than into cash, would change the
+cost side of this trade-off entirely — untested, out of scope here).
+
 ## Pending Tasks
+
+- **New, separate strategy: push-based long-term strategy identification.**
+  (Idea captured 17-Aug-2026, not scoped or started.) Distinct from the
+  monthly momentum engine above -- a system that continuously scans the
+  market and news for longer-horizon setups and pushes alerts, rather
+  than waiting for a monthly expiry-driven rebalance. Grew out of asking
+  whether the 14-Aug-2026 SAIL/metals sector flush was predictable from
+  news in advance rather than explainable after the fact -- conclusion
+  was that reactive financial journalism doesn't give an edge, but
+  leading indicators (commodity prices, scheduled macro events, PSU
+  stake-sale-type chatter) might, IF systematised. This system currently
+  ingests no news/sentiment feed at all (the only LLM call is narrow
+  corporate-action-filing classification) -- a real news-driven layer
+  would be new infrastructure, not an extension of `strategy.py`. Needs
+  its own scoping pass before any build starts: what "long-term" means
+  here, what counts as a push trigger, what data sources, and how it
+  avoids the standard news-sentiment-signal trap (looks good in
+  backtest, evaporates out of sample).
 
 - **Re-run every 03-Aug comparison through `simulate_month`.** See
   `research/README.md` for the list.

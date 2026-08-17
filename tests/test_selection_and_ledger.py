@@ -309,10 +309,15 @@ def test_compute_stock_entry_band_clamping():
 
 def test_compute_min_portfolio_sizing():
     import daily_report
+    # entry_lo/close are required alongside entry_hi -- _compute_min_
+    # portfolio_sizing filters out any row missing one (14-Aug-2026: this
+    # fixture predated that requirement and every row was silently
+    # dropped, so min_portfolio came back 0 regardless of what the test
+    # actually meant to check).
     rows = [
-        {"symbol": "HIGH_PX", "entry_hi": 30000.0},
-        {"symbol": "MED_PX", "entry_hi": 5000.0},
-        {"symbol": "LOW_PX", "entry_hi": 100.0},
+        {"symbol": "HIGH_PX", "close": 29700.0, "entry_lo": 29400.0, "entry_hi": 30000.0},
+        {"symbol": "MED_PX", "close": 4950.0, "entry_lo": 4900.0, "entry_hi": 5000.0},
+        {"symbol": "LOW_PX", "close": 99.0, "entry_lo": 98.0, "entry_hi": 100.0},
     ]
     sizing = daily_report._compute_min_portfolio_sizing(rows)
     assert sizing["min_portfolio"] > 0
@@ -357,9 +362,12 @@ def test_render_entry_sheet_includes_limit_orders_and_sizing_guide():
         },
     }
     rendered = daily_report.render_entry_sheet(sheet)
-    assert "LIMIT BUY ORDERS" in rendered
-    assert "Limit Entry Range (±3.0%): 97.00 – 103.00" in rendered
-    assert "Rec. Quantity: 100 shares" in rendered
-    assert "MINIMUM PORTFOLIO GUIDE" in rendered
-    assert "Recommended Min Portfolio:" in rendered
+    # Message format changed since this assertion was written -- clean
+    # numbered/INR-prefixed style matching entry_tracking.
+    # render_new_investor_day0, retiring the old dev_pct-heavy
+    # "MINIMUM PORTFOLIO GUIDE" bullet block (15-Aug-2026 redesign,
+    # "this looks like shit, fix it the way we did for NEW investors").
+    assert "BUY — limit orders" in rendered
+    assert "1. ACME: 100 shares @ INR 103.00" in rendered
+    assert "minimum basket size: ~INR 100,000.00" in rendered
 

@@ -1,0 +1,5 @@
+[TEST ARTIFACT -- NOT A REAL SENT MESSAGE]
+See 2026-07-28_sheet.txt for the explanation. This is leftover output from
+an isolated --no-send dry run on 2026-08-15, not something actually sent to
+investors. Left in place only because this sandbox cannot delete files on
+this mount.

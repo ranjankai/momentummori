@@ -1029,6 +1029,40 @@ trailing/ratchet exit further unless `V4_REDEPLOY_ENABLED` changes (an
 early exit into a live redeploy, rather than into cash, would change the
 cost side of this trade-off entirely — untested, out of scope here).
 
+## Session 21-Aug-2026 — live daily note was silently missing its SOLD section
+
+Caught by asking "should we not show a SOLD bucket after the hold one?".
+`render()`'s "Exited" section (`rpt.exited_review`, mark-to-today for
+already-sold names) and "SELL ORDERS" section (`rpt.sell_orders`,
+target-placeable reminders) both existed and both worked -- but only if
+fed by `daily_report.build()`, which computed them. `cmd_daily` has used
+`cycle_state.build()` for the live evening note since the incremental
+rewrite (see the WHY section at the top of `cycle_state.py`), and its
+`to_report()` never carried that port over. `daily_report.build()` is
+dead code now (nothing calls it), so both sections have been silently
+empty in every live message since the rewrite.
+
+Fixed in `cycle_state.py`: `apply_session` now refreshes `last_close` on
+an EXITED position too (skips the stop/target/corp-action re-check,
+just the price mark -- costs nothing extra, the frame is already in
+hand), since the module's "EXITED is terminal" design otherwise froze
+the price on exit day, making a same-day-forward `now_pct` comparison
+impossible. `to_report()` now populates `sell_orders` and
+`exited_review` from `holdings`/`exits`, mirroring the old
+`daily_report.build()` logic (no LLM off-momentum leg -- that needs the
+full day's price history, which the incremental path deliberately
+doesn't load).
+
+`daily_report.render()`: exit date now shown with an ordinal day (`"on
+18th"`) rather than bare, and the "← left on the table" flag on exited
+names was removed per explicit instruction -- it's a closed trade with
+no action possible; framing it as money left on the table read as
+second-guessing a decision that's already done.
+
+Verified against a read-only copy of the real `data/cycle_state.json`
+(ADANIGREEN, stopped out -5.0% on 18-Aug, now showing -5.4% in the
+Exited section, right after CONTINUE TO HOLD). 58/58 tests pass.
+
 ## Pending Tasks
 
 - **New, separate strategy: push-based long-term strategy identification.**

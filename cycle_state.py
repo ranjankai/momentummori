@@ -204,6 +204,17 @@ def apply_session(state: dict, day: date, frame, use_classifier=None) -> dict:
 
     for sym, pos in state["positions"].items():
         if pos["status"] == "EXITED":
+            # Terminal for stop/target/corp-action purposes (see module
+            # docstring) -- but the frame for today is already in hand
+            # here, so refreshing last_close costs nothing extra and lets
+            # the evening note show "sold at X%, trading at Y% now" for
+            # the rest of the cycle instead of freezing that comparison
+            # on exit day (17-Aug-2026 fix -- see render()'s exited_review
+            # section, which had nothing to read before this).
+            if frame is not None and sym in frame.index:
+                c = frame.at[sym, "close_price"] if "close_price" in frame.columns else None
+                if pd.notna(c) and c and c > 0:
+                    pos["last_close"] = float(c)
             continue
         if frame is None or sym not in frame.index:
             pos["stale"] = True
@@ -331,6 +342,41 @@ def to_report(state: dict):
             rpt.flagged_actions.append(
                 f"{h.symbol}: no price in today's bhavcopy -- carrying the "
                 f"previous close, stop not evaluated")
+
+    # --- actionable target sells (17-Aug-2026 fix) ------------------------
+    # Ported from daily_report.build(), which computed this but is no
+    # longer called anywhere -- cmd_daily has used cycle_state.build() for
+    # this note since the incremental rewrite, and this function never
+    # carried the port over, so render()'s "SELL ORDERS" section has been
+    # silently empty in every live evening note since. No LLM off-momentum
+    # check here -- that needs the day's full price history, which this
+    # incremental path deliberately does not load; only the target-hit
+    # case, which only needs `last` and `target`, both already in hand.
+    for h in holdings:
+        if h.target_placeable:
+            rpt.sell_orders.append({
+                "symbol": h.symbol, "kind": "TARGET",
+                "limit": round(h.target, 2),
+                "last": round(h.last, 2) if h.last else None,
+            })
+
+    # --- exited names, marked to today (17-Aug-2026 fix) ------------------
+    # Same gap as above: render()'s "Exited" section reads rpt.exited_review,
+    # which this function never populated, so a SOLD name simply vanished
+    # from the note the day after its stop/target fired -- no reminder it
+    # was ever held, no visibility if the exit gave money back. `last_close`
+    # on an EXITED position is now refreshed daily in apply_session (same
+    # fix), so "now" is real, not frozen on the exit date.
+    for e in exits:
+        pos = state["positions"][e.symbol]
+        now = pos.get("last_close")
+        rpt.exited_review.append({
+            "symbol": e.symbol,
+            "reason": e.reason,
+            "exit_pct": round(e.pnl_pct, 2),
+            "now_pct": round((now - e.entry) / e.entry * 100, 2) if now else None,
+            "exit_date": e.exit_date,
+        })
     return rpt
 
 

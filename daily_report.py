@@ -259,6 +259,17 @@ def _fmt_money(v):
     return f"{v:,.2f}"
 
 
+def _ordinal_day(d) -> str:
+    """17 -> '17th', 21 -> '21st', 2 -> '2nd' -- 11/12/13 are the
+    exception (all 'th') that day % 10 alone gets wrong."""
+    n = d.day
+    if 11 <= n % 100 <= 13:
+        suffix = "th"
+    else:
+        suffix = {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+    return f"{n}{suffix}"
+
+
 def _entry_portfolio_title(expiry) -> str:
     """
     "Entry portfolio for <Mon>-<Mon> '<YY> - Existing investors" (15-Aug-
@@ -938,12 +949,11 @@ def render(rpt: Report) -> str:
         L.append("<b>Exited</b>")
         for e in rpt.exited_review:
             x = f"{'+' if e['exit_pct'] >= 0 else ''}{e['exit_pct']:.1f}%"
+            on = f" on {_ordinal_day(e['exit_date'])}" if e.get("exit_date") else ""
             if e["now_pct"] is None:
-                L.append(f"{esc(e['symbol'])} (exited at {x})")
+                L.append(f"{esc(e['symbol'])} (exited at {x}{on})")
                 continue
             y = f"{'+' if e['now_pct'] >= 0 else ''}{e['now_pct']:.1f}%"
-            worse = e["now_pct"] > e["exit_pct"]
-            L.append(f"{esc(e['symbol'])} (exited at {x}, today at {y})"
-                     + ("  \u2190 left on the table" if worse else ""))
+            L.append(f"{esc(e['symbol'])} (exited at {x}{on}, today at {y})")
 
     return "\n".join(L).strip()

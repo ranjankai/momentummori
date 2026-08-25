@@ -646,7 +646,14 @@ def render_new_investor_day0(state: dict) -> str:
             "Day-1+ new-investor copy is not built yet")
 
     expiry_dt = _dt.date.fromisoformat(state["expiry"])
-    header_date = expiry_dt.strftime("%-d %B %Y")
+    # NOT strftime("%-d ...") -- that no-leading-zero flag is a Linux/
+    # glibc strftime extension. It works fine in dev (Linux sandbox) and
+    # raises ValueError: Invalid format string on the real Windows
+    # production machine, where this actually runs (25-Aug-2026: this is
+    # exactly what silently killed tonight's expiry-evening run -- no
+    # log line past "Opened entry-tracking window", no failure alert,
+    # nothing sent, because this call sat outside cmd_sheet's try/except).
+    header_date = f"{expiry_dt.day} {expiry_dt.strftime('%B %Y')}"
 
     targets = {d["target_pct"] for d in state["stocks"].values()
               if d.get("status") != "no_data" and "target_pct" in d}

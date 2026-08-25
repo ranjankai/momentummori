@@ -294,82 +294,95 @@ def cmd_sheet(args):
     # (15-Aug-2026, explicit instruction -- "Why would there be a 4th
     # message. There are only 3 messages on expiry day: 1. Performance to
     # date  2. New Investors  3. Existing investors"):
-    import ledger
-    perf_data = ledger.performance()
-    perf_text = daily_report.render_performance(perf_data)
+    # Everything below, through the ledger writes, used to sit outside any
+    # try/except -- a bug anywhere in here (25-Aug-2026: a Windows-only
+    # strftime crash in render_new_investor_day0) died as an uncaught
+    # exception with no log line past "Opened entry-tracking window", no
+    # failure alert, and no messages sent, on the one evening silence is
+    # least acceptable. Wrapped so any future failure here is at least
+    # reported instead of vanishing.
+    try:
+        import ledger
+        perf_data = ledger.performance()
+        perf_text = daily_report.render_performance(perf_data)
 
-    # Open the multi-day entry-tracking window over the FULL basket (every
-    # row, not just the fresh buys) -- a new investor needs a fill plan
-    # for EVERY name, including the ones tagged HOLD at the strategy
-    # level (see build_entry_sheet's 'action' tag warning: HOLD there
-    # means "continuing from last cycle's strategy basket", not "already
-    # in this investor's book"). Those HOLD-tagged names are passed as
-    # market_buy_symbols so they skip the 3-stage limit chain and fill at
-    # Day-1's market open instead -- the same entry-price basis an
-    # existing investor's TOP-UP gets (see open_window's and
-    # render_new_investor_day0's docstrings for the full reasoning).
-    # Fresh buys ALSO cover an existing investor's empty slots -- from
-    # Day 1 onward the very same window and the very same entry_tracking.
-    # render() message serve both audiences identically (locked in
-    # earlier this thread: "Yes, this is correct, only Day 0 will be
-    # different for new vs existing. Day 1 will be the same.").
-    import entry_tracking
-    full_basket_symbols = [r["symbol"] for r in sheet["rows"]]
-    market_buy_symbols = [r["symbol"] for r in sheet["rows"] if r.get("action") == "HOLD"]
-    # Per-symbol, not the flat config default -- build_entry_sheet already
-    # resolved each row's own target_pct (LLM-derived when
-    # config.LLM_TARGET_ENABLED, else the flat default per row anyway), so
-    # passing the map keeps the Day-1/2 "Exit: Rs Y" notes in agreement
-    # with the "Book at +X%" figure the Day-0 sheet just showed for that
-    # same symbol (14-Aug-2026 fix -- previously nothing was passed here
-    # and every follow-up note silently used the flat default regardless).
-    target_pct_by_symbol = {r["symbol"]: r.get("target_pct", config.V4_TARGET_PCT)
-                            for r in sheet["rows"]}
-    et_state = entry_tracking.open_window(
-        expiry, full_basket_symbols, stop_pct=sheet.get("stop_pct"),
-        target_pct=target_pct_by_symbol,
-        slot_target=sheet["sizing"].get("slot_target"),
-        market_buy_symbols=market_buy_symbols)
-    new_investor_text = entry_tracking.render_new_investor_day0(et_state)
+        # Open the multi-day entry-tracking window over the FULL basket (every
+        # row, not just the fresh buys) -- a new investor needs a fill plan
+        # for EVERY name, including the ones tagged HOLD at the strategy
+        # level (see build_entry_sheet's 'action' tag warning: HOLD there
+        # means "continuing from last cycle's strategy basket", not "already
+        # in this investor's book"). Those HOLD-tagged names are passed as
+        # market_buy_symbols so they skip the 3-stage limit chain and fill at
+        # Day-1's market open instead -- the same entry-price basis an
+        # existing investor's TOP-UP gets (see open_window's and
+        # render_new_investor_day0's docstrings for the full reasoning).
+        # Fresh buys ALSO cover an existing investor's empty slots -- from
+        # Day 1 onward the very same window and the very same entry_tracking.
+        # render() message serve both audiences identically (locked in
+        # earlier this thread: "Yes, this is correct, only Day 0 will be
+        # different for new vs existing. Day 1 will be the same.").
+        import entry_tracking
+        full_basket_symbols = [r["symbol"] for r in sheet["rows"]]
+        market_buy_symbols = [r["symbol"] for r in sheet["rows"] if r.get("action") == "HOLD"]
+        # Per-symbol, not the flat config default -- build_entry_sheet already
+        # resolved each row's own target_pct (LLM-derived when
+        # config.LLM_TARGET_ENABLED, else the flat default per row anyway), so
+        # passing the map keeps the Day-1/2 "Exit: Rs Y" notes in agreement
+        # with the "Book at +X%" figure the Day-0 sheet just showed for that
+        # same symbol (14-Aug-2026 fix -- previously nothing was passed here
+        # and every follow-up note silently used the flat default regardless).
+        target_pct_by_symbol = {r["symbol"]: r.get("target_pct", config.V4_TARGET_PCT)
+                                for r in sheet["rows"]}
+        et_state = entry_tracking.open_window(
+            expiry, full_basket_symbols, stop_pct=sheet.get("stop_pct"),
+            target_pct=target_pct_by_symbol,
+            slot_target=sheet["sizing"].get("slot_target"),
+            market_buy_symbols=market_buy_symbols)
+        new_investor_text = entry_tracking.render_new_investor_day0(et_state)
 
-    print(perf_text)
-    print()
-    print(new_investor_text)
-    print()
-    print(existing_text)
+        print(perf_text)
+        print()
+        print(new_investor_text)
+        print()
+        print(existing_text)
 
-    # Record BEFORE sending -- same guarantee as the daily note (the
-    # decision is what matters, delivery is just transport). One record
-    # per message sent.
-    buys = [r["symbol"] for r in sheet["rows"] if r.get("action") != "HOLD"]
-    ledger.record_note("perf", expiry, rendered=perf_text, **perf_data)
-    entry_tracking.record(et_state, new_investor_text)
-    ledger.record_note(
-        "sheet", expiry, rendered=existing_text,
-        sells=[s["symbol"] for s in (sheet.get("sells") or [])],
-        holds=list(sheet.get("holds") or []),
-        buys=buys,
-        stop_pct=sheet.get("stop_pct"),
-        veto_dropped=[list(x) for x in (sheet.get("dropped") or [])],
-        veto_ran=sheet.get("veto_ran"),
-        rebalance=sheet.get("rebalance"),
-    )
+        # Record BEFORE sending -- same guarantee as the daily note (the
+        # decision is what matters, delivery is just transport). One record
+        # per message sent.
+        buys = [r["symbol"] for r in sheet["rows"] if r.get("action") != "HOLD"]
+        ledger.record_note("perf", expiry, rendered=perf_text, **perf_data)
+        entry_tracking.record(et_state, new_investor_text)
+        ledger.record_note(
+            "sheet", expiry, rendered=existing_text,
+            sells=[s["symbol"] for s in (sheet.get("sells") or [])],
+            holds=list(sheet.get("holds") or []),
+            buys=buys,
+            stop_pct=sheet.get("stop_pct"),
+            veto_dropped=[list(x) for x in (sheet.get("dropped") or [])],
+            veto_ran=sheet.get("veto_ran"),
+            rebalance=sheet.get("rebalance"),
+        )
 
-    # Apply the book side-effects of tonight's decisions. Both rest on the
-    # same assumption as entry_tracking's fills: the investor is assumed to
-    # follow every recommendation exactly, so the book is updated the
-    # moment the decision is made, not on some later confirmation step
-    # that doesn't exist in this system. (The TOP-UP names get a second,
-    # more precise book.open_position() write on Day 1 once the actual
-    # market-open fill price is known -- harmless double-write, same
-    # target share count either way, just a more accurate entry_price
-    # once real.)
-    import book
-    for s in (sheet.get("sells") or []):
-        book.close_position(s["symbol"])
-    for sym, d in (sheet.get("rebalance") or {}).items():
-        if d.get("status") == "rebalance":
-            book.adjust_shares(sym, d["new_shares"], expiry)
+        # Apply the book side-effects of tonight's decisions. Both rest on the
+        # same assumption as entry_tracking's fills: the investor is assumed to
+        # follow every recommendation exactly, so the book is updated the
+        # moment the decision is made, not on some later confirmation step
+        # that doesn't exist in this system. (The TOP-UP names get a second,
+        # more precise book.open_position() write on Day 1 once the actual
+        # market-open fill price is known -- harmless double-write, same
+        # target share count either way, just a more accurate entry_price
+        # once real.)
+        import book
+        for s in (sheet.get("sells") or []):
+            book.close_position(s["symbol"])
+        for sym, d in (sheet.get("rebalance") or {}).items():
+            if d.get("status") == "rebalance":
+                book.adjust_shares(sym, d["new_shares"], expiry)
+    except Exception as exc:
+        logging.getLogger("momentum_tracker").exception(
+            "New-investor/existing-investor delivery failed for %s", expiry)
+        alerts.send_failure(f"sheet delivery for {expiry}", exc)
+        raise
 
     if args.no_send:
         print("\n(--no-send: no messages delivered)")

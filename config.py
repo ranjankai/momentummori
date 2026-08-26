@@ -183,8 +183,21 @@ V4_REENTRY_POLICY = "not_if_stopped"
 # A day-on-day ratio outside these bounds is treated as a corporate action
 # and the prior history is back-adjusted. Caught real 5:1 splits in MCX,
 # KOTAKBANK, CAMS and ANGELONE that were otherwise scored as -80% crashes.
-V4_SPLIT_RATIO_LOW = 0.6
-V4_SPLIT_RATIO_HIGH = 1.8
+# (Tightened 25-Aug-2026 from 0.6/1.8 to match cycle_state.py's HARD_LOW/
+# HIGH -- cycle_state.py's own comment already documented this exact
+# inconsistency: "the legacy V4_SPLIT_RATIO_* constants (0.6-1.8)... are
+# wider, so a 3:2 bonus (0.667) or 5:4 (0.80) fell straight through" for
+# the daily holding check, and it was fixed there by using its own local
+# 0.72/1.40 constants instead of these. That fix was never propagated
+# here, so selection scoring (this constant) and market_breadth (which
+# reads this same constant) were both still missing exactly those milder
+# bonuses -- not a design choice, a stale value that never got the
+# earlier memo. Matches strategy.py/cycle_state.py's already-agreed
+# HARD_LOW/HIGH exactly; the classifier still runs on any breach here
+# when config.CORP_ACTION_LLM_ENABLED, same as before, now just
+# triggered by the correct band.)
+V4_SPLIT_RATIO_LOW = 0.72
+V4_SPLIT_RATIO_HIGH = 1.40
 
 # NSE moved monthly F&O expiry from the last Thursday to the last Tuesday
 # with effect from 01-Sep-2025. Expiries landing on a holiday roll back to
@@ -209,6 +222,26 @@ V4_CARRY_FORWARD = True
 # Where cmd_basket persists currently-open positions between live runs, so
 # it can tell HOLD from SELL from BUY the next time you generate a basket.
 V4_HOLDINGS_FILE = os.path.join(DATA_DIR, "v4_holdings.json")
+
+# BACKTEST_VERSION (26-Aug-2026 addition): a NEW, deliberately unambiguous
+# version tag for the archived-backtest system in book.py/BACKTEST_LOG.md,
+# separate from two PRE-EXISTING and unrelated numbering schemes already
+# in this codebase: "V4" (the live strategy's own name, baked into these
+# constant names) and "v5"/"v6" (ad hoc filename iterations of the
+# fill-mechanism research script, e.g. research/fill_realism_v6_3stage.py)
+# -- neither of those was ever a formal version identifier, so reusing
+# either here would be confusing, not descriptive.
+#
+# Bump this ONLY when the core strategy changes along one of the three
+# axes agreed 26-Aug-2026: (1) stock-picking algo, (2) entry strategy,
+# (3) exit strategy. Every kind="simulated" row written to
+# book_archive.jsonl is tagged with the version that produced it, so a
+# future backtest for the CURRENT version can read straight from the
+# archive (book.simulated_records) and never re-simulate a month it has
+# already run under this same version. Tonight's fixes (risk-anchor
+# quote-price rule, book.json as the fill-history source of truth) are
+# entry-strategy changes, so this starts at BT1, not BT0.
+BACKTEST_VERSION = "BT1"
 
 
 # ---------------------------------------------------------------------------
@@ -340,10 +373,31 @@ CORP_ACTION_LLM_ENABLED = True
 
 # Consult the classifier for GREY-ZONE moves (roughly -15% to -28%, where
 # a 5:4 bonus and a bad day look identical) during the holding-window
-# adjustment. OFF because it fires one NSE fetch plus one LLM call per
-# breach per symbol, and across the full universe that makes the daily
-# report time out. The hard band still catches every split without it;
-# this is precision, not safety. Turn on only with a capped symbol list.
+# adjustment.
+#
+# (25-Aug-2026: earlier tonight I reverted this to False, reasoning that
+# "no capped-symbol-list safeguard exists yet" -- that was wrong, and
+# wrong for the exact reason this whole audit started: I asserted it
+# without re-checking the actual call site. strategy.py's simulate_month
+# (the only real caller of adjust_holding_window) already restricts BOTH
+# the band scan and the classifier to `_held` -- this month's basket plus
+# carried-in positions, ~10 symbols, not the ~194-name universe -- a fix
+# dated 03-Aug-2026, three weeks before tonight. cycle_state.py's own
+# call site is inherently per-held-position already. So the "capped
+# symbol list" this flag was waiting on already exists on both real call
+# paths.
+#
+# Verified empirically, not just by reading code: scanned the full cached
+# universe (194 symbols, ~653 sessions) for ratio breaches -- the kind
+# that would trigger classify() -- and found 23-26 in the ENTIRE window,
+# not per day. At most ~10 possible per live cycle (bounded by _held),
+# and both the NSE filing fetch (nse_corporate.py) and the LLM response
+# (llm.py) are disk-cached by symbol+date, so a breach classified once is
+# never re-fetched on subsequent days of the same holding cycle. This is
+# not the full-universe-every-day cost that made the daily report time
+# out originally -- that was `adjust_holding_window` running with
+# symbols=None (full universe), fixed 03-Aug-2026, unrelated to this flag.
+# Turning it on now.)
 CORP_ACTION_GREY_ZONE_ENABLED = True
 
 # |predicted / observed - 1| above this is reported as non-reconciling.
@@ -402,23 +456,13 @@ LEDGER_ARCHIVE_DIR = os.path.join(DATA_DIR, "notes")
 LEDGER_ENABLED = True
 
 
-# ---------------------------------------------------------------------------
-# ACTUAL FILLS
-#
-# daily_report reconstructs the month from bhavcopy, which assumes you
-# entered at the session open after expiry. When your real fill differs
-# -- a delayed start, a partial, a gap -- every level derived from it is
-# wrong: the 5% stop, the 40% target and the P&L.
-#
-# This file overrides the reconstruction per symbol:
-#
-#   { "KAYNES": {"entry": 3804.60, "entry_date": "2026-08-03"} }
-#
-# Symbols not listed keep the reconstructed entry. Delete an entry once
-# the position is closed. Gitignored -- it is personal position data.
-# ---------------------------------------------------------------------------
-
-ACTUAL_FILLS_FILE = os.path.join(DATA_DIR, "actual_fills.json")
+# (removed 25-Aug-2026: ACTUAL_FILLS_FILE, a documented but never-wired
+# per-symbol real-fill override -- zero readers anywhere in the repo.
+# Superseded properly: book.json IS the real-fill record now, written by
+# entry_tracking.py the moment each name actually fills, and read by
+# cycle_state.py/daily_report.build() via strategy.simulate_month's
+# entry_overrides. One source of truth, not a second file nobody wired
+# up. See book.py's module docstring.)
 
 
 # ---------------------------------------------------------------------------

@@ -1456,6 +1456,14 @@ Also decided: `cycle_state.json`'s full-overwrite-with-no-history behavior on ev
 
 `render()`'s FILLED/LIMIT BUY/MANDATORY sections were two lines per stock (Entry/Qty, then SL/Exit) with no blank line between stocks — read as a wall of text on Telegram. Changed to one line per stock (`SYMBOL: N qty @ price  SL: X  Exit: Y`), explicit request.
 
+### KPITTECH 54→55 shares question, and NSE tick-size rounding — both closed, no code change
+
+Two follow-up questions, neither required a fix:
+
+Why did KPITTECH's share count go from 54 (Day-1 limit, missed) to 55 (Day-2 re-quote) when the price also went UP (579.79 → 594.43)? Checked against the actual numbers: 54 × 579.79 = Rs 31,309 (-3.6% off the Rs 32,479 slot target this basket sizes every name to); 55 × 594.43 = Rs 32,694 (+0.66% off the same target). The allocation moved CLOSER to equal-weight, not further — well inside `ENTRY_MAX_WEIGHT_DEV_PCT` (10%). Mechanically the two quotes aren't even produced by the same formula: Day-1's price/share pair is solved jointly against the volatility band (`_solve_shares_to_slot` searches n-1/n/n+1); Day-2's price comes first, independently, off Day-1's realized volatility (`_vol_requote`), and shares are only derived after as `round(slot_target / price)`. The 54→55 jump is whole-share rounding around a fixed rupee target, not the strategy rewarding a price rise with a bigger position.
+
+Separately: quoted prices (594.43, 32,479/n, etc.) aren't valid NSE tick multiples — real limit/SL orders must land on the exchange's price-band tick size (₹0.01 below ₹250, ₹0.05 up to ₹1,000, ₹0.10 up to ₹5,000, ₹0.50 up to ₹10,000, ₹1.00 up to ₹20,000, ₹5.00 above — last revised 15-Apr-2025). A `_round_to_tick()` helper was designed (price-band lookup, `round(round(price/tick)*tick, 2)`) but explicitly NOT wired in — decided to leave tick-rounding to the investor when they place the order, since the deviation is at most a few paise and not worth adding another rounding layer to live sizing code. No code changed as a result of this discussion.
+
 ## Pending Tasks
 
 - **New, separate strategy: push-based long-term strategy identification.**

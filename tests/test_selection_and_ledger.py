@@ -325,6 +325,36 @@ def test_compute_min_portfolio_sizing():
     assert sizing["shares"]["HIGH_PX"]["shares"] >= 1
 
 
+def test_solve_shares_to_slot_prefers_lower_price_on_a_genuine_tie():
+    """
+    25-Aug-2026 regression, narrowed same day after a close-cap over-
+    correction was tried and reverted on evidence (see
+    _solve_shares_to_slot's docstring): the ONLY real bug was a tied
+    deviation broken by arbitrary Python `set` iteration order instead of
+    preferring the lower price -- real example, KPITTECH closed 592, n=55
+    gave 590.53 (at/below close) and n=54 gave 601.47, a coin-flip tie on
+    deviation (both ~0%), and the arbitrary order picked 601.47. Locks in
+    the fix for that specific failure mode: on a genuine tie, lower price
+    wins. Does NOT assert "never above close" -- a genuine unique best
+    fit (e.g. COFORGE, no tie at all) landing slightly above close is
+    correct, not a bug; see the docstring for the measured -2.6pt cost of
+    over-correcting that case, which is why this test doesn't check it.
+    """
+    import daily_report
+
+    close = 592.0
+    band_pct = 2.45 / 100.0
+    r = {"symbol": "KPITTECH_LIKE", "close": close,
+         "entry_lo": close * (1 - band_pct), "entry_hi": close * (1 + band_pct)}
+    # slot chosen so slot/54 and slot/55 are BOTH inside the band --
+    # a genuine tie, same shape as tonight's real KPITTECH case.
+    slot = close * 54.5
+    n, price, dev = daily_report._solve_shares_to_slot(slot, r)
+    assert price <= close, (
+        f"tie should resolve to the lower price (<= close), got {price}")
+    assert n == 55
+
+
 def test_render_entry_sheet_includes_limit_orders_and_sizing_guide():
     import daily_report
     from datetime import date

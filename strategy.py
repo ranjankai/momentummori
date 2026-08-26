@@ -148,6 +148,22 @@ def market_breadth(as_of: date, symbols, price_hist: dict) -> float:
     Computed on the expiry close, so it is available BEFORE entry. This
     is the regime signal that picks the stop width -- see
     config.REGIME_STOP_ENABLED and the table in config.py.
+
+    25-Aug-2026 fix: this used to compare RAW, un-split-adjusted closes
+    against their own 200-day mean. `split_adjust` was already built and
+    already used for the selection signal (line ~599) and for holding
+    P&L (`adjust_holding_window`) -- this function was the one place
+    still reading straight bhavcopy prices. A stock with any split/bonus
+    in the trailing ~200 sessions read as artificially "below its own
+    average" (the mean still dominated by the higher pre-action prices)
+    for months afterward, which can flip the whole cycle's stop-width
+    call since several logged cycles sit within a few points of the 45%
+    threshold. Uses the legacy heuristic (no symbol/dates/classifier) --
+    this runs across the whole ~200-symbol universe every cycle, so the
+    same cost concern that keeps CORP_ACTION_GREY_ZONE_ENABLED off
+    applies here too; the hard band alone already catches every real
+    split, same as the selection signal's own fallback when the
+    classifier path isn't given symbol/dates.
     """
     days = [d for d in sorted(price_hist) if d <= as_of]
     above = []
@@ -158,6 +174,7 @@ def market_breadth(as_of: date, symbols, price_hist: dict) -> float:
               and price_hist[d].at[s, "close_price"] > 0]
         if len(cl) < 200:
             continue
+        cl = split_adjust(cl)
         above.append(1 if cl[-1] > pd.Series(cl).tail(200).mean() else 0)
     if not above:
         logger.warning("Breadth unavailable (no symbol had 200 sessions)")

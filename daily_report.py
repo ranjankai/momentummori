@@ -164,10 +164,47 @@ def build(as_of: date, session=None) -> Report:
             return llm_judgment.choose_candidate(ordered, _rs).get("symbol")
 
     stop_pct = strategy.resolve_stop_pct(expiry, symbols, hist)
+
+    # entry_overrides from book.json (25-Aug-2026 fix): this reconstructs
+    # the OUTGOING month to tell HOLD from SELL -- it used to enter every
+    # name at "days[0]'s open" via simulate_month's default, an idealized
+    # assumption identical to the one just fixed in cycle_state.py, and
+    # for the same reason: book.json already has the REAL fill price/date
+    # (and the real risk_anchor stop/target basis) for every name that
+    # actually went through entry_tracking's 3-stage mechanism, but this
+    # function never looked. A name real-stopped-out near its idealized
+    # stop level could silently misclassify as HOLD (or the reverse) --
+    # see book.py's module docstring. Reuses simulate_month's existing
+    # entry_overrides parameter (built for exactly this) instead of any
+    # new mechanism. A symbol with no book record (legacy, pre-book.py)
+    # simply isn't in the dict and falls back to the old behaviour.
+    import book as book_module
+    entry_overrides = {}
+    for sym in basket_symbols:
+        # A position that already exited mid-cycle (stop/target) is
+        # archived and gone from the live book by now -- fall back to
+        # book_archive.jsonl so an already-closed name's real entry isn't
+        # silently dropped back to the idealized guess (25-Aug-2026,
+        # found reconstructing this exact case: ADANIGREEN stopped out
+        # 18-Aug, book.get() alone would go blank for it here).
+        pos = book_module.get(sym) or book_module.get_archived(sym)
+        if pos and pos.get("entry_price") is not None:
+            anchor = pos.get("risk_anchor") or pos["entry_price"]
+            # A real entry_date at or before this window's own first day
+            # (a continuing hold from an earlier cycle, or a backfilled/
+            # reconstructed record stamped with the expiry date itself
+            # rather than a real Day-1 trading date) must clamp to
+            # `days[0]` -- simulate_month only walks `days`, so an
+            # unclamped earlier date would defer into a date the loop
+            # never visits and the position would silently never open.
+            entry_dte = max(date.fromisoformat(pos["entry_date"]), days[0])
+            entry_overrides[sym] = (pos["entry_price"], entry_dte, anchor)
+
     res = strategy.simulate_month(
         ranked_order, merged, days, sectors,
         basket_symbols=basket_symbols, carry_forward=True,
-        stop_pct=stop_pct, candidate_fn=candidate_fn)
+        stop_pct=stop_pct, candidate_fn=candidate_fn,
+        entry_overrides=entry_overrides or None)
     # `res.to_buy` (mid-cycle replacement candidates) is NOT carried onto
     # the Report at all (14-Aug-2026 cleanup) -- Stream 2 (this daily note)
     # never buys, only Stream 1 (entry_tracking.py, expiry evening through
@@ -308,8 +345,17 @@ def render_performance(perf: dict) -> str:
     L = ["<b>Portfolio performance</b>"]
     for r in months:
         y, m, _ = r["expiry"].split("-")
+        # Label by the HOLDING month (expiry + 1), not the expiry's own
+        # month -- money from a 30-Jun expiry sits in the market through
+        # JULY (entry_date the next session), so it belongs on the "Jul"
+        # row. Every other date label in this codebase (_cycle_title,
+        # _entry_portfolio_title) already uses this convention; this one
+        # didn't, and was mislabeling every row one month early
+        # (25-Aug-2026 fix).
+        hold_month = int(m) % 12 + 1
+        hold_year = int(y) + 1 if int(m) == 12 else int(y)
         sign = "+" if r["return_pct"] >= 0 else ""
-        L.append(f"{names[int(m) - 1]} {y}: {sign}{r['return_pct']:.2f}%")
+        L.append(f"{names[hold_month - 1]} {hold_year}: {sign}{r['return_pct']:.2f}%")
 
     # Headline is the additive sum -- the same convention as the monthly
     # rows above, so the column visibly adds up. CAGR below is still
@@ -455,6 +501,45 @@ def _solve_shares_to_slot(slot: float, r: dict) -> tuple:
     Factored out of _compute_min_portfolio_sizing so _resolve_shares_to_
     target below can fit a DIFFERENT set of rows to a slot size someone
     else already decided, instead of duplicating this search.
+
+    Tie-break, fixed 25-Aug-2026: whenever slot/n lands unclamped inside
+    the band for more than one candidate n (common -- the band is often
+    wide enough that both n and n+1 fit with ~0% deviation), EVERY one of
+    those candidates scores as good as the others on deviation alone. The
+    old code kept whichever was checked first in an unordered Python
+    `set` -- an arbitrary tie-break that, for a lower share count (higher
+    per-share price), regularly landed the recommended limit price ABOVE
+    the stock's own last close (real example: KPITTECH closed 592,
+    n=55 gave 590.53 -- at/below close -- and n=54 gave 601.47, a coin-
+    flip tie on deviation, and the arbitrary order picked 601.47).
+    Placing a "limit" buy above the last close defeats the point of a
+    limit order -- it just chases the price up. On a tie (within 1e-6%),
+    now prefer the candidate with the LOWER price.
+
+    A same-day close cap was ALSO tried (25-Aug-2026) and REVERTED same
+    day, on evidence, not aesthetics: even with no tie, a genuinely
+    unique best fit (COFORGE closed 1892.80, only n=17 gave ~0%
+    deviation) can still land a little above close, simply because the
+    fixed slot doesn't divide evenly into that stock's price. Forcing
+    every such case down to `close` looks tidier per order, but
+    `entry_hi` is not an arbitrary ceiling -- `_compute_stock_entry_band`
+    builds it as a real, two-sided, volatility-derived confidence
+    interval (close +/- band_pct) for where the stock will plausibly
+    trade over the Day-1/2/3 fill window. Truncating Day-1 to only the
+    lower half of that interval throws away real fill opportunities the
+    model itself says are legitimate. Measured effect, run through the
+    real 3-stage entry-tracking mechanism against the canonical 13-cycle
+    basket (`research/fill_realism_v6_3stage.py`): the close cap dropped
+    the Day-1 fill rate from 61% to 37% and cost -2.6pt of realized
+    return over 13 cycles, because everything that misses Day 1 falls
+    through to Day 2's Parkinson-volatility re-quote, which is
+    deliberately wide (calibrated for near-certain completion, not price
+    precision) and landed those names at a worse average price than
+    Day-1's tighter band ever would have. The tie-break above is a free
+    win -- same deviation, strictly better price, no downside, so it
+    stays. This was not: it traded a real, measured return cost for an
+    aesthetic preference on a small minority of names, so it's reverted.
+    `entry_hi` remains the true upper bound; `close` is not a ceiling.
     """
     close, lo, hi = r["close"], r["entry_lo"], r["entry_hi"]
     ideal_n = max(1, round(slot / close))
@@ -465,7 +550,8 @@ def _solve_shares_to_slot(slot: float, r: dict) -> tuple:
         # placeable, just no longer a perfect match.
         price = min(max(slot / n, lo), hi)
         dev = abs(n * price - slot) / slot * 100.0
-        if best_local is None or dev < best_local[2]:
+        if (best_local is None or dev < best_local[2] - 1e-6
+                or (abs(dev - best_local[2]) <= 1e-6 and price < best_local[1])):
             best_local = (n, price, dev)
     return best_local
 
@@ -541,21 +627,61 @@ def build_entry_sheet(expiry: date, session=None) -> dict:
     stop = stop_pct_sheet / 100.0
     target = config.V4_TARGET_PCT / 100.0
 
-    # What are we holding right now? Reconstruct the OUTGOING month (the
-    # one ending at this expiry) so the sheet can tell HOLD from SELL
-    # from BUY. Without this the sheet lists all ten names as buys,
-    # including ones already owned, and never says what to exit.
+    # What are we holding right now? Read it straight from book.json (26-
+    # Aug-2026 structural fix), not by asking daily_report.build() to
+    # RE-DERIVE the whole outgoing month from scratch. Re-deriving means
+    # re-running selection/ranking against today's data and asking
+    # "what would the algorithm pick if run again today" -- not "what
+    # was actually held" -- and those answers diverge the moment
+    # something un-reconstructable changed a decision after the fact.
+    # Concretely: KALYANKJIL was ASM-vetoed on 03-Aug and dropped from
+    # the real basket, but ASM is only ever a CURRENT snapshot, so
+    # re-deriving the 28-Jul basket today silently un-vetoes it -- and
+    # ADANIGREEN, which WAS actually in the real basket, silently
+    # vanishes, because the redo has no way to know it belonged there.
+    # book.py (plus its archive) is the one place this was ever recorded
+    # WITHOUT needing reconstruction -- written the moment a real fill or
+    # a real close happens. See book.holdings_for_expiry's docstring.
+    #
+    # 25-Aug-2026 fix (carried forward): a data gap or StrategyError here
+    # must not silently continue with current={}, which would render
+    # every one of the 10 names as a fresh BUY -- including ones already
+    # held, doubling real exposure and sending zero SELL orders for names
+    # that should have been dropped. Let it propagate -- cmd_sheet's own
+    # try/except already sends a real failure alert instead of a
+    # silently-wrong one.
+    import book as book_module
+    import types
+    # book.json tags each position with the governing expiry it was last
+    # (re-)entered under, which for anything still live going into THIS
+    # expiry evening is the PRIOR monthly expiry, not this one -- `expiry`
+    # here names the sheet being produced (the month STARTING after it),
+    # the outgoing month it needs to look up is one cycle earlier.
+    outgoing_expiry = governing_expiry(expiry, strategy.known_trading_days())
+    book_positions = book_module.holdings_for_expiry(outgoing_expiry)
     current = {}
-    try:
-        outgoing = build(expiry, session=session)
-        current = {h.symbol: h for h in outgoing.holdings}
-    except Exception as exc:
-        logger.warning("Could not reconstruct the outgoing month (%s); "
-                       "treating every name as a fresh buy", exc)
+    for sym, pos in book_positions.items():
+        entry_px = pos["entry_price"]
+        if pos.get("exit_price") is not None:
+            last = pos["exit_price"]
+        elif sym in signals.index:
+            last = float(signals.at[sym, "close"])
+        else:
+            last = None
+        pnl_pct = ((last - entry_px) / entry_px * 100.0) if last else None
+        current[sym] = types.SimpleNamespace(
+            symbol=sym, entry=entry_px, entry_date=pos.get("entry_date"),
+            last=last, pnl_pct=pnl_pct)
 
     new_set = set(kept)
     to_hold = [s for s in kept if s in current]
-    to_sell = [s for s in current if s not in new_set]
+    # A name already closed mid-cycle (stop/target, exit_price set) needs
+    # no SELL instruction here -- there is nothing left to sell, and the
+    # investor was already told about it the day it happened (daily_
+    # report's own "Exits today" section). Only a still-live position
+    # that simply dropped out of the new ranking needs a real order.
+    to_sell = [s for s in current
+              if s not in new_set and book_positions[s].get("exit_price") is None]
 
     rows = []
     for sym in kept:
@@ -593,64 +719,34 @@ def build_entry_sheet(expiry: date, session=None) -> dict:
         h = current[sym]
         sells.append({"symbol": sym, "last": h.last, "pnl_pct": h.pnl_pct})
 
-    # Slot target (14-Aug-2026 rewire -- "we will not sell held stocks...
-    # nobody said we can't buy more", explicit instruction; retires
-    # _slot_target_from_holds' interval-stabbing anchor and
-    # _compute_hold_rebalance's trim-only asymmetry together, see
-    # BACKTEST_LOG.md's 14-Aug-2026 "coverage-scale" section for the full
-    # derivation and the research validation this mirrors exactly):
-    #
-    # 1. Build a fresh, +/-max_dev%-consistent minimum basket exactly as
-    #    a brand-new investor gets -- priciest pick's own band-low sets
-    #    the slot, every name in the FULL basket solved to whole shares
-    #    against it.
-    # 2. Coverage scale: k = max(held_shares / this-basket's-own-share-
-    #    count) over every hold, using the RATIO not the raw share count
-    #    (a cheap stock can carry a huge raw count without being the
-    #    binding constraint -- found via IDEA vs KAYNES in the 2025-09
-    #    backtest cycle). Scaling the whole basket by k guarantees, by
-    #    construction, every hold's target share count is >= what's
-    #    already held.
-    # 3. Feasibility floor, generalised to ALL ten names now (holds
-    #    included, was fresh-buys-only before 14-Aug-2026): if any single
-    #    name's own band-low still can't fit inside the coverage-scaled
-    #    slot, that price becomes the floor instead. Safe regardless of
-    #    order -- raising the slot only ever grows every name's share
-    #    count, so it can only make step 2's guarantee MORE generous.
-    # A hold is NEVER sold to bring its weight down -- only a genuine
-    # stop/target/rollover exit still sells one (unchanged, strategy.
-    # simulate_month's job, not this sheet's).
+    # Slot target (25-Aug-2026 rewire -- coverage-scale k RETIRED. It was
+    # meant to keep the quoted minimum basket in sync with a hold's real
+    # accumulated share count, but it does this by inflating the ONE
+    # shared slot every row (including unrelated names) gets solved
+    # against -- and that let one hold's inflated ratio push a totally
+    # unrelated anchor stock's own correct, by-construction fit (e.g.
+    # POWERINDIA's natural 1-share/0%-dev answer) off to a worse whole-
+    # share count purely because the shared slot had grown for someone
+    # else's reason. Explicit instruction, restated plainly: (1) find the
+    # new min basket -- one fresh, un-inflated calculation every cycle,
+    # exactly what a brand-new investor gets; (2) new investors buy every
+    # continuing name (still in the new basket) at market open, fresh
+    # picks via the limit chain; (3) existing investors are just told the
+    # min number for each hold -- top up to it if they're short, or hold
+    # (never sold down) if they already have more. No scaling, no ratio,
+    # one basket, "scale up as needed" covers everyone already holding
+    # extra.
     max_dev = getattr(config, "ENTRY_MAX_WEIGHT_DEV_PCT", 10.0)
     ceiling = 500000
     slots = getattr(config, "PORTFOLIO_SIZE", 10)
     rows_by_symbol = {r["symbol"]: r for r in rows}
 
-    import book as book_module
-
     base_sizing = _compute_min_portfolio_sizing(rows)
-    base_slot = base_sizing["slot_target"]
-    base_shares = {sym: s["shares"] for sym, s in base_sizing["shares"].items()}
+    slot_target = base_sizing["slot_target"]
+    capped = base_sizing.get("capped", False)
 
-    if to_hold:
-        ratios = []
-        for sym in to_hold:
-            pos = book_module.get(sym)
-            if pos and pos.get("shares") and base_shares.get(sym):
-                ratios.append(pos["shares"] / base_shares[sym])
-        k = max(ratios) if ratios else 1.0
-    else:
-        k = 1.0
-    slot_target = base_slot * k
-
-    floor = max((r["entry_lo"] for r in rows if r.get("entry_lo")), default=0)
-    slot_target = max(slot_target, floor)
-    capped = False
-    if slot_target * slots > ceiling:
-        capped = True
-        slot_target = ceiling / slots
-
-    # Solve the FULL basket (holds + fresh buys) against the final slot in
-    # one consistent pass -- a HOLD's whole-share TARGET (for the top-up
+    # Solve the FULL basket (holds + fresh buys) against this one slot in
+    # a consistent pass -- a HOLD's whole-share minimum (for the top-up
     # calc below) comes from the exact same fit every fresh buy gets, not
     # a separate calculation.
     sizing = _resolve_shares_to_target(rows, slot_target)
@@ -672,33 +768,22 @@ def build_entry_sheet(expiry: date, session=None) -> dict:
 
 def _compute_hold_rebalance(rows: list, holds: list, slot_target: float) -> dict:
     """
-    Top-up-only rebalance for names carrying over as a HOLD (14-Aug-2026
-    rewire -- retires the trim-only asymmetry and _slot_target_from_
-    holds' interval-stabbing anchor together: "we will not sell held
-    stocks... nobody said we can't buy more" (explicit instruction).
-    Trimming an overweight hold for rebalancing purposes is retired
-    entirely -- a hold is only ever sold for a genuine stop/target/
-    rollover exit (unchanged, strategy.simulate_month's job), never to
-    bring its weight down. See BACKTEST_LOG.md's 14-Aug-2026 "coverage-
-    scale" section for the full design and the POWERINDIA/KAYNES-style
-    overweight cases this replaces.
+    Top-up-only rebalance for names carrying over as a HOLD (25-Aug-2026:
+    slot_target is now the plain, un-inflated min basket -- coverage-
+    scale k retired, see build_entry_sheet's comment for why). Simple by
+    design, per explicit instruction: solve this cycle's min share count
+    for the name (the exact same `_solve_shares_to_slot` fit every fresh
+    buy in the basket gets), then compare to what's actually held --
+    below the min, top up to it; at or above, just hold (never sold down;
+    "scale up as needed" covers anyone already holding extra). A hold is
+    only ever sold for a genuine stop/target/rollover exit (unchanged,
+    strategy.simulate_month's job), never to bring its weight down.
 
-    `slot_target` (build_entry_sheet's caller) has ALREADY been raised by
-    the coverage-scale + feasibility-floor logic to be big enough that
-    every hold's real share count fits inside it -- so this function's
-    only job is to solve each hold's whole-share TARGET against that
-    slot, the exact same `_solve_shares_to_slot` fit every fresh buy in
-    the basket gets, and report the gap to buy. The gap should never be
-    negative by construction (that guarantee lives in build_entry_sheet's
-    coverage-scale step); `max(target, shares)` below is belt-and-
-    suspenders against a stray rounding edge case, not the mechanism
-    that makes this safe.
-
-    A held name is bought at Day-1's MARKET open, same session a fresh
-    buy's Day-1 limit is quoted -- no limit chase, no gap-risk-abort: a
-    top-up isn't a new position, the hold already carries full exposure
-    to that name's moves, so neither rationale for the fresh-buy 2-stage
-    chain applies here.
+    A held name that needs a top-up is bought at Day-1's MARKET open,
+    same session a fresh buy's Day-1 limit is quoted -- no limit chase,
+    no gap-risk-abort: a top-up isn't a new position, the hold already
+    carries full exposure to that name's moves, so neither rationale for
+    the fresh-buy 2-stage chain applies here.
     """
     import book as book_module
 
@@ -723,7 +808,8 @@ def _compute_hold_rebalance(rows: list, holds: list, slot_target: float) -> dict
 
         if target <= shares:
             dev = ((value - slot_target) / slot_target * 100.0) if slot_target else 0.0
-            out[sym] = {"status": "ok", "shares": shares, "value": value, "dev_pct": dev}
+            out[sym] = {"status": "ok", "shares": shares, "min_shares": n,
+                        "value": value, "dev_pct": dev}
             continue
 
         new_value = target * close
@@ -731,7 +817,7 @@ def _compute_hold_rebalance(rows: list, holds: list, slot_target: float) -> dict
             "status": "rebalance", "action": "TOP-UP",
             "current_shares": shares, "current_value": value,
             "current_dev_pct": ((value - slot_target) / slot_target * 100.0) if slot_target else 0.0,
-            "new_shares": target, "delta_shares": target - shares,
+            "new_shares": target, "min_shares": n, "delta_shares": target - shares,
             "new_value": new_value,
             "new_dev_pct": ((new_value - slot_target) / slot_target * 100.0) if slot_target else 0.0,
             "price": close,
@@ -748,9 +834,12 @@ def render_entry_sheet(sheet: dict) -> str:
     "MINIMUM PORTFOLIO GUIDE"-block version: "this looks like shit,
     fix it the way we did for NEW investors" -- explicit instruction).
     Three clean sections in fixed order (money out, then rebalance,
-    then money in), one continuous numbering across all of them, a
-    single SL/Exit line up top instead of repeating it per stock, and
-    "INR"/"~" money formatting matching the new-investor message exactly.
+    then money in), each with its OWN numbering starting back at 1
+    (25-Aug-2026 fix -- SELL/TOP-UP/BUY/CONTINUE TO HOLD are different
+    order tickets, not one combined list, so a continuous count across
+    all of them was actively misleading), a single SL/Exit line up top
+    instead of repeating it per stock, and "INR"/"~" money formatting
+    matching the new-investor message exactly.
     """
     from alerts import esc
     rows = sheet["rows"]
@@ -772,7 +861,6 @@ def render_entry_sheet(sheet: dict) -> str:
         L.append("Please place these orders immediately:")
     L.append("")
 
-    i = 0
     rebalance = sheet.get("rebalance") or {}
     rb_items = [(sym, rebalance.get(sym, {"status": "no_book_record"}))
                 for sym in holds]
@@ -789,8 +877,7 @@ def render_entry_sheet(sheet: dict) -> str:
     # (15-Aug-2026 fix -- "no need to say dropped out of the basket").
     if sells:
         L.append("<b>SELL — market on open</b>")
-        for s in sells:
-            i += 1
+        for i, s in enumerate(sells, 1):
             L.append(f"{i}. {esc(s['symbol'])}")
         L.append("")
 
@@ -809,8 +896,7 @@ def render_entry_sheet(sheet: dict) -> str:
     # _compute_hold_rebalance's docstring (a top-up isn't new exposure).
     if needs_action:
         L.append("<b>TOP-UP — market on open</b>")
-        for sym, d in needs_action:
-            i += 1
+        for i, (sym, d) in enumerate(needs_action, 1):
             L.append(f"{i}. {esc(sym)}: Add {d['delta_shares']:,} more "
                      f"share{'s' if d['delta_shares'] != 1 else ''} "
                      f"(already held: {d['current_shares']:,})")
@@ -819,8 +905,7 @@ def render_entry_sheet(sheet: dict) -> str:
     # Money in last: fresh limit buys, the 3-stage chain from tomorrow.
     if buys:
         L.append("<b>BUY — limit orders</b>")
-        for r in buys:
-            i += 1
+        for i, r in enumerate(buys, 1):
             lp = r.get("rec_limit_price", r["entry_hi"])
             sh = r.get("rec_shares") or 1
             share_word = "share" if sh == 1 else "shares"
@@ -832,15 +917,17 @@ def render_entry_sheet(sheet: dict) -> str:
 
     if no_action:
         L.append("<b>CONTINUE TO HOLD — no order needed</b>")
-        for sym, d in no_action:
-            L.append(f"{esc(sym)}: {d['shares']:,} shares, on target")
+        for i, (sym, d) in enumerate(no_action, 1):
+            min_shares = d.get("min_shares", d["shares"])
+            share_word = "share" if min_shares == 1 else "shares"
+            L.append(f"{i}. {esc(sym)}: hold {min_shares:,} {share_word}")
         L.append("")
 
     if no_data:
         L.append("<b>CONTINUE TO HOLD — verify your own holding size</b>")
-        for sym, d in no_data:
-            L.append(f"{esc(sym)} — no book record on file, please check "
-                     f"against the slot target above")
+        for i, (sym, d) in enumerate(no_data, 1):
+            L.append(f"{i}. {esc(sym)} — no book record on file, please "
+                     f"check against the slot target above")
         L.append("")
 
     # 15-Aug-2026: dropped three lines the investor doesn't need --
@@ -955,5 +1042,18 @@ def render(rpt: Report) -> str:
                 continue
             y = f"{'+' if e['now_pct'] >= 0 else ''}{e['now_pct']:.1f}%"
             L.append(f"{esc(e['symbol'])} (exited at {x}{on}, today at {y})")
+        L.append("")
+
+    # 25-Aug-2026 fix: rpt.flagged_actions was written to the ledger
+    # (ledger.py persists it) but never actually shown here -- e.g. "no
+    # price in today's bhavcopy -- carrying the previous close, stop not
+    # evaluated" sat silently in a JSONL file while the holding above
+    # rendered as an ordinary HOLD with a live-looking SL line. A stop
+    # that isn't actually being checked is exactly the kind of thing that
+    # must show up on the phone, not just in an audit trail.
+    if rpt.flagged_actions:
+        L.append("<b>⚠ Flagged</b>")
+        for a in rpt.flagged_actions:
+            L.append(esc(a))
 
     return "\n".join(L).strip()

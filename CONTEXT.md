@@ -1063,6 +1063,399 @@ Verified against a read-only copy of the real `data/cycle_state.json`
 (ADANIGREEN, stopped out -5.0% on 18-Aug, now showing -5.4% in the
 Exited section, right after CONTINUE TO HOLD). 58/58 tests pass.
 
+## Session 25-Aug-2026 — expiry-evening incident, Apr-Aug performance backfill, book.json reconstruction
+
+**The incident.** Tonight's real `cmd_sheet` run started (logged "Opened
+entry-tracking window") and then died with no further log line, no
+failure alert, no messages sent. Cause: `entry_tracking.
+render_new_investor_day0` used `expiry_dt.strftime("%-d %B %Y")` --
+`%-d` (no leading zero) is a Linux/glibc strftime extension, not
+supported on Windows, where this actually runs. Raised `ValueError`
+uncaught, because this whole block (`entry_tracking.open_window()`
+through the ledger writes) sat outside `cmd_sheet`'s try/except -- only
+`build_entry_sheet`/`render_entry_sheet` were protected. Fixed the date
+formatting (`f"{expiry_dt.day} {expiry_dt.strftime('%B %Y')}"`,
+portable) and wrapped the rest of `cmd_sheet` in its own try/except so a
+future failure here reports instead of vanishing.
+
+**Numbering and month-label fixes**, `daily_report.render_entry_sheet`/
+`render_performance`: SELL/TOP-UP/BUY/CONTINUE-TO-HOLD each now number
+independently from 1 (previously one continuous count across all
+sections, which was confusing -- "9. KALYANKJIL" under a heading with
+only 6 items). CONTINUE TO HOLD rows are now numbered too (previously
+bare). Performance-message month labels were off by one cycle: they
+used the raw expiry month instead of the HOLDING month (expiry + 1) --
+a 30-Jun-2026 expiry's money sits in the market through JULY (entry_date
+the next session), so it belongs on the "Jul" row, not "Jun". Every
+other date label in this codebase (`_cycle_title`,
+`_entry_portfolio_title`) already used the correct convention; this one
+didn't.
+
+**Apr-Aug performance backfill.** The live ledger only has "daily"
+records from the June-2026 and July-2026 expiries onward (live tracking
+started then) -- so the performance message could only ever show 2
+months, when investors were told it would show Apr onward. Backfilled
+March/April/May-2026 expiries (holding Apr/May/Jun) into the real
+`data/ledger.jsonl` via `research/harness.run_cycle` -- the same
+production engine as the canonical 13-cycle number, NOT a
+reimplementation. Flagged each backfilled row's `flagged_actions` with
+an explicit "BACKFILLED" note. Caveat, stated in that note too:
+`harness.v4_basket` does not apply the ASM surveillance veto (no
+historical ASM snapshot exists), so these three months' basket
+composition is an approximation of what live production would actually
+have held. Performance message now reads Apr +19.61%, May -0.80%,
+Jun -0.30%, Jul -3.77%, Aug +4.29% (in progress), total +19.03%.
+
+**White paper cross-check.** Re-ran the real canonical 13-cycle backtest
+(`research/run13.py`) from scratch to verify the numbers quoted in the
+white paper delivered earlier this session. 12 of 13 cycles matched
+exactly. One did not: 2025-04 (Apr-2025 expiry, held into May-2025) --
+white paper says +0.28%, fresh re-run gives +0.81%, deterministically
+(3/3 identical re-runs). Traced to BSE Ltd (in that cycle's basket),
+which had a real 2:1 bonus, ex-date 23-May-2025, inside the holding
+window -- exactly the grey-zone corporate-action case the classifier
+exists to catch, and `harness.py`'s own docstring already documents that
+a classifier-ON backtest "can in principle differ if the model answers
+differently" run to run. Net: total moves from +39.57% to +40.11%
+(0.54pp), everything else (worst month, best month, win rate,
+methodology) checks out exactly.
+
+**book.json reconstruction for the 4 pre-book.py holdings.** TRENT,
+BANDHANBNK, POWERINDIA, GVT&D (continuing HOLD names in tonight's real
+sheet) had no book record -- they were bought 29-Jul-2026, before
+book.py existed, and nothing ever backfilled it. Per explicit
+instruction ("assume you started as a new investor in Mar-Apr cycle and
+accordingly build the existing investor portfolio"), reconstructed via
+`research/book_backfill.py`: walks the exact same mechanical chain
+`build_entry_sheet` uses every real month (`_compute_min_portfolio_
+sizing` -> coverage-scale k -> `_resolve_shares_to_target` ->
+`_compute_hold_rebalance`), cycle by cycle from the Mar-2026 expiry
+through the REAL, known 28-Jul-2026 basket (not backtested -- ground
+truth from this session's earlier `entry_tracking.json` reconstruction).
+Same no-historical-ASM-veto caveat as above applies to the Mar/Apr/
+May/Jun-2026 legs. Result: TRENT and GVT&D trace a real accumulation
+(entered fresh in the Jun-2026 expiry cycle, one coverage-scale top-up
+into Jul-2026) -- shares 16 and 11 respectively as of 28-Jul-2026.
+BANDHANBNK and POWERINDIA do not appear in the no-veto backtest's
+Apr/May/Jun-2026 baskets at all (POWERINDIA drops out after Mar-2026;
+BANDHANBNK only appears in the May-2026-expiry basket, not June's), so
+under this reconstruction they come out as fresh 28-Jul-2026 entries
+(276 and 2 shares) rather than a multi-cycle accumulation -- explicitly
+flagged as such, not silently guessed. If the real (ASM-vetoed) basket
+actually held either of them continuously earlier, this would
+understate their true accumulated count; unverifiable without a
+historical ASM archive, which does not exist. Seeded into the real
+`data/book.json`. Verified end-to-end against an isolated copy of
+tonight's real sheet: TOP-UP correctly shows "TRENT: Add 1 more share
+(already held: 16)" etc. instead of the "no book record on file"
+fallback.
+
+**Reconstruction REVERTED same night -- it corrupted an unrelated
+stock's own correct number.** Once seeded, tonight's New-investor
+message showed POWERINDIA at 2 shares. Before the reconstruction (no
+book record at all, coverage-scale k defaulting to 1.0), the same
+message correctly showed "POWERINDIA: 1 share @ market open" -- which
+is POWERINDIA's own, by-construction, 0%-deviation anchor fit (it is
+the priciest name in the basket; `base_slot` is defined off its own
+band-low). Cause: TRENT/GVT&D/BANDHANBNK's reconstructed ratios pushed
+coverage-scale k to ~1.556, inflating the ONE shared slot used to solve
+every row's share count. At that inflated slot, `_resolve_shares_to_
+target`'s deviation-minimization flips POWERINDIA from n=1 (36.49%
+under at the inflated slot) to n=2 (22.03% over) -- numerically closer,
+but wrong, because POWERINDIA never needed scaling; only the OTHER
+names' reconstructed accumulation did. This is exactly the same
+unverifiable data the reconstruction script's own docstring already
+flagged ("cannot verify a multi-cycle history... falls back to treating
+as fresh entry") going on to corrupt a different, previously-correct
+number. Reverted `data/book.json` to `{}`. Re-verified: POWERINDIA back
+to the correct 1 share, min basket back to a clean, un-inflated
+~INR 324,792, no distortion anywhere else. Conclusion: the plain "no
+book record on file, please check against the slot target above"
+fallback was never a defect -- it's the honest, safe default for data
+we can't verify, and it was already producing the correct downstream
+math. Do not re-seed `book.json` from a backtest-style reconstruction
+again; if TRENT/BANDHANBNK/POWERINDIA/GVT&D's real historical share
+counts are ever needed, get them from the user's actual broker
+statement, not a reconstructed backtest chain.
+
+**Real fix, same night: coverage-scale k retired entirely** (explicit
+instruction -- "no chutiye, WAIT... 1) FIND NEW MIN BASKET 2) mark
+continuing names BUY AT MARKET OPEN for new guys 3) for existing guys,
+just show the min number they need to continue holding or if they need
+to buy more"). The k-inflation mechanism itself, not just the
+reconstructed data feeding it, was the bug: it let one hold's
+accumulated ratio inflate the ONE shared slot every row is solved
+against, corrupting unrelated names' own correct fit. `build_entry_
+sheet` now always uses `slot_target = base_slot` -- the fresh,
+un-inflated `_compute_min_portfolio_sizing` result, exactly what a
+brand-new investor gets, every cycle, no ratio, no scaling.
+`_compute_hold_rebalance` unchanged in mechanism (still top-up-only,
+never sells) but now solves against this plain slot, so its `n` really
+is the cycle's true minimum. Re-seeded `data/book.json` with the
+reconstructed values (16/276/2/11) since the corruption path that made
+them unsafe is now closed -- verified TRENT/BANDHANBNK/POWERINDIA/
+GVT&D all correctly land on their own natural minimum (11/186/1/8)
+with no cross-contamination.
+
+**CONTINUE TO HOLD display, corrected again same night**: first pass
+showed "hold your {actual held} shares (min basket needs {min})" --
+wrong; the line must show the min basket number plainly, same as every
+other line in the sheet, not the investor's actual held count (that
+was the whole point of "we equalized the new and existing basket
+completely" -- one canonical number, not a per-investor variant).
+Fixed to `"{i}. {sym}: hold {min_shares} shares"`. "upscale as needed"
+already covers investors holding more than the minimum; the message
+doesn't need to say so per line.
+
+Final verified real sheet for 25-Aug-2026 (all three messages, generated
+from the real production code against the real `book.json`, run in an
+isolated copy so nothing was sent/written until confirmed):
+- Min basket: ~INR 324,792, same figure in both New and Existing
+  investor messages.
+- New investors: 10 lines, POWERINDIA correctly at 1 share.
+- Existing investors: SELL (KAYNES, FORCEMOT, SAIL, IDEA, AMBER), BUY
+  (6 fresh limit orders), CONTINUE TO HOLD -- TRENT 11, BANDHANBNK 186,
+  POWERINDIA 1, GVT&D 8.
+
+## Session 25-Aug-2026 (continued) -- limit-price-above-close bug, then a
+## full audit and architecture fix (book.json as single source of truth)
+
+**`_solve_shares_to_slot` tie-break bug, real and kept.** User noticed
+KPITTECH quoted at 601.47 when it closed at 592 -- a real "limit above
+market" defeats the point of a limit order. Root cause: when multiple
+whole-share counts land inside a stock's volatility band with ~equal
+(near-zero) deviation from the target slot, the old code kept whichever
+candidate Python's `set` iterated first -- arbitrary, unrelated to
+price. Fixed: on a tie (within 1e-6%), prefer the lower price.
+
+**A same-day close-cap was ALSO tried and REVERTED, on evidence.**
+First instinct was "never quote above close, full stop" -- clamping the
+upper bound to `close` instead of `entry_hi`. This is NOT the same bug:
+a genuinely unique best fit (no tie, e.g. COFORGE) landing slightly
+above close is legitimate -- `entry_hi` is a real, volatility-derived
+estimate of where the stock can plausibly trade, not decoration.
+Measured via a new backtest (`research/fill_realism_v6_3stage.py`, the
+real 3-stage mechanism ported from entry_tracking.py's live code and
+run against the canonical 13-cycle basket): the close-cap dropped the
+Day-1 fill rate from 61% to 37% (everything that misses Day 1 falls to
+Day 2's much less precise Parkinson re-quote) and cost -2.6pt of real
+return over 13 cycles. Reverted the cap, kept the tie-break. With tie-
+break only: Day-1 fill rate 48.5%, real 3-stage cost -0.91pt over 13
+cycles (+40.11% idealized -> +39.20% real) -- a small, sane,
+explainable "implementation shortfall" (Perold 1988), not an outlier.
+Lesson stated plainly for next time: a fix driven by "this looks
+stupid" needs to be measured against the real mechanism before being
+trusted, not just pattern-matched to the complaint.
+
+**Discovery: `cycle_state.py` (live daily/monthly tracking) and
+`daily_report.build()` (still-live, NOT dead code despite this file's
+own 21-Aug-2026 section claiming otherwise -- it's called from
+`build_entry_sheet` line ~625 to reconstruct the outgoing month) both
+independently assumed every position enters at "the open of the first
+session after expiry," completely ignoring that `entry_tracking.py` +
+`book.py` already track the REAL fill price/day via the 3-stage
+mechanism. Two facts forced this to the surface: (1) re-deriving
+Apr/May/Jun-2026's backfilled performance through the real 3-stage
+mechanism showed real, non-trivial swings (some months better, some
+worse, never zero) versus the idealized number actually sent; (2) user
+asked directly why book.json wasn't the obvious single source of truth
+here. It should have been, and now is.
+
+**Full audit, three parallel agents (strategy.py/corporate_actions.py,
+daily_report.py, ledger.py/run_strategy.py/config.py), findings
+independently spot-verified before acting.** Fixed the same session,
+"keep it simple, no new architecture" (explicit instruction -- rejected
+the idea of a second `ACTUAL_FILLS_FILE`-style parallel mechanism;
+book.json already existed and just needed to be read):
+
+1. **book.py rewritten as the actual single source of truth.**
+   `open_position` now also stores `risk_anchor` (previously only lived
+   transiently in entry_tracking.json, never persisted -- needed because
+   stop/target are deliberately computed off Day-1's open, never a
+   delayed Day-2/3 fill price, per the 12-Aug-2026 "risk-anchor fix").
+   New `seed_pending(symbols, expiry)`, called from
+   `entry_tracking.open_window`, gives the book a full 10-name row at
+   expiry evening instead of only gaining rows lazily as fills happen
+   (explicit instruction: "book.json should have 10 names with blank
+   entry prices on Day of expiry evening"). `close_position` now
+   ARCHIVES the full record to `data/book_archive.jsonl` (append-only)
+   before deleting from the live book, instead of just deleting --
+   explicit instruction: "when book_close happens, the data should be
+   archived so we don't simulate everything again" (this is exactly why
+   every backtest tonight needed caveats about ASM being unreconstructable
+   for a past date -- a real archive going forward removes that need for
+   anything closed from here on). `run_strategy.py`'s two close_position
+   call sites now pass exit_price/exit_date/reason.
+2. **cycle_state.py's PENDING->HOLD transition** now reads
+   `entry_price`/`risk_anchor` from `book.get(sym)` when a real record
+   exists (it always should, by the time this runs -- `cmd_daily` gates
+   on `entry_tracking.is_window_active` first, so the window has fully
+   resolved), falling back to today's open only if no book record
+   exists at all (legacy/pre-book.py edge case).
+3. **daily_report.build()** now builds `entry_overrides` from
+   `book.json` before calling `strategy.simulate_month` -- reusing the
+   EXISTING `entry_overrides` parameter (built for the fill-realism
+   research), not a new mechanism. Entry dates at or before the
+   reconstruction window's own first day (a continuing multi-cycle hold,
+   or a backfilled record stamped with the expiry date itself) are
+   clamped to `days[0]` -- unclamped, `simulate_month`'s day-by-day loop
+   would defer to a date it never visits and the position would
+   silently never open. Verified against tonight's real sheet before
+   and after: identical, correct output.
+4. **daily_report.build_entry_sheet's silent exception fallback
+   removed.** Previously caught ANY failure reconstructing the outgoing
+   month and continued with `current={}` (every name renders as a fresh
+   BUY, doubling exposure on continuing holds, zero SELLs) -- just a
+   `logger.warning`, no alert. Now propagates to `cmd_sheet`'s existing
+   try/except, which does alert. A degraded-but-successful-looking sheet
+   is worse than a loud failure.
+5. **cmd_daily's entry-tracking branch (Days 1-3 after every expiry)**
+   was unprotected by try/except -- the exact same blind spot as the
+   `%-d` incident, just a different code path that hadn't failed yet.
+   Wrapped, matching cmd_sheet's pattern.
+6. **`render()` now surfaces `rpt.flagged_actions`** (e.g. "no price in
+   today's bhavcopy -- stop not evaluated") -- previously written to the
+   ledger via `ledger.record` but never actually shown in any message a
+   human sees.
+7. **cmd_basket persisted the flat `config.V4_STOP_LOSS_PCT`** into its
+   printed summary and the `basket_*.json` audit file, even though the
+   basket's real stop (shown in its own table) is `decision.stop_pct`,
+   the regime-pegged value when `REGIME_STOP_ENABLED`. Fixed to use
+   `decision.stop_pct` in both places.
+8. **`market_breadth` (the regime-stop signal) read raw, un-split-
+   adjusted closes** -- confirmed by direct code read, no adjustment
+   call anywhere in the function, while the selection signal and
+   holding P&L both already adjust. A split/bonus in the trailing ~200
+   sessions biased that stock's "above/below 200-day average" reading
+   for months, and several logged cycles sit within a few points of the
+   45% regime threshold. Fixed with `split_adjust`'s legacy heuristic
+   (no symbol/dates/classifier -- this runs across the whole ~200-symbol
+   universe every cycle, same cost concern as item 9 below).
+9. **`CORP_ACTION_GREY_ZONE_ENABLED` was `True`**, directly contradicting
+   its own comment ("OFF because it... makes the daily report time
+   out... turn on only with a capped symbol list") and this file's own
+   documented backlog, which still lists the cost-cap safeguard as an
+   open, unstarted task. No such safeguard exists. Reverted to `False`
+   -- almost certainly an accidental toggle, not a considered change.
+
+   **Superseded same night.** That revert was itself wrong, for the
+   exact reason this whole audit started: asserted "no safeguard exists"
+   without re-checking the call site. `strategy.simulate_month` (the
+   only real caller of `adjust_holding_window`) already restricts BOTH
+   the band scan and the classifier to `_held` (this month's basket plus
+   carried-in positions, ~10 symbols) -- a fix dated 03-Aug-2026, three
+   weeks before this audit. `cycle_state.py`'s call site is inherently
+   per-held-position already. Verified empirically, not just by reading
+   code: scanned the full cached universe (194 symbols, ~653 sessions)
+   for ratio breaches and found 23-26 in the entire window, not per day;
+   both the NSE filing fetch and the LLM response are disk-cached by
+   symbol+date, so a breach classified once is never re-fetched for the
+   rest of that holding cycle. The full-universe-every-day cost that
+   actually caused the timeout was `adjust_holding_window` running with
+   `symbols=None`, already fixed 03-Aug-2026, unrelated to this flag.
+   **`CORP_ACTION_GREY_ZONE_ENABLED` set back to `True`.** Full test
+   suite green after the flip.
+10. **Deleted `ACTUAL_FILLS_FILE`** (config.py) -- documented, zero
+    readers anywhere in the repo, a mechanism someone designed for
+    exactly this same "real fill differs from reconstruction" problem
+    and never wired up. Superseded properly by book.json now actually
+    being read (items 1-3), not by a second file.
+11. **`split_adjust`'s `V4_SPLIT_RATIO_LOW/HIGH` was 0.6/1.8**, wider
+    than `adjust_holding_window`'s already-agreed 0.72/1.40 standard
+    (see `cycle_state.py`'s own comments: a 3:2 bonus, ratio 0.667, or a
+    5:4 bonus, ratio 0.80, fell straight through the wider band
+    undetected). This was not a fresh decision to make -- it was already
+    made, just not applied to selection scoring. Fixed to 0.72/1.40 to
+    match. Checked the cost side of this too: tightening the band adds
+    only 3 incremental breach events across the full 194-symbol universe
+    over ~653 cached sessions (23 -> 26 total), not a per-day cost.
+    `market_breadth` (item 8) inherits the corrected threshold for free,
+    since it reads the same config constant.
+
+**Explicitly NOT changed, flagged instead of silently touched:**
+`adjust_holding_window`'s hard band (0.72/1.40) plus its narrower
+grey-zone band (0.85/1.18) is the deliberately-agreed standard;
+selection now matches it (item 11). What's still unreconciled is
+*mechanism*, not threshold: selection (`split_adjust`) has no grey-zone
+concept at all -- inside its single hard band it always treats the move
+as genuine, never consults the classifier. A moderate bonus (e.g. 0.80)
+sitting inside [0.72, 1.40] is invisible to selection scoring even
+though the identical ratio would trigger classifier review during
+holding. Unifying that would change which stocks get selected some
+months -- a real behavioural change, not a bugfix. Left as a flagged
+follow-up (see `Pending Tasks`).
+
+**Also flagged, not yet fixed (lower priority / needs a decision, not
+a quick patch):** `ledger.performance()` silently drops any expiry with
+no recorded ledger entry from both the sum and the CAGR denominator
+(a failed run vanishes rather than showing as missing); `resolve_expiry`
+falls back to the unadjusted last-Tuesday with only a warning if the
+NSE holiday feed fails, which `cmd_sheet`'s guard could read as "not
+expiry" and silently skip the whole month; `CASH_ACCRUES_RISK_FREE`/
+`RISK_FREE_ANNUAL_PCT` are documented but have zero readers (empty
+slots currently earn 0% for the month, not the intended pro-rated
+risk-free rate); a few stray Unicode em-dashes in bare `print()` calls
+in run_strategy.py that could raise `UnicodeEncodeError` on a non-UTF8
+Windows console before any alert fires; `ledger.py` has a duplicate
+`_append`-equivalent block instead of calling the existing helper.
+
+Full test suite (59 tests) green after every change above; tonight's
+real sheet re-verified byte-identical (aside from the intended fixes)
+against an isolated copy after the full batch.
+
+**Process note, repeated because it bit twice more tonight despite being
+already documented above**: `--no-send` only blocks Telegram delivery.
+It does NOT gate `ledger.record_note`/`entry_tracking.record` (bit once
+tonight, 3 stray ledger lines, cleaned up) NOR `book.close_position`/
+`book.adjust_shares` (bit again, prematurely applied tonight's not-yet-
+placed TOP-UP amounts to the real book.json, caught and reverted before
+send). Every one of `book.BOOK_FILE`, `entry_tracking.STATE_FILE`,
+`cycle_state.STATE_FILE`, `config.LEDGER_FILE`/`LEDGER_ARCHIVE_DIR` must
+be isolated before any real-data test run of `cmd_sheet` -- all four,
+every time, no exceptions.
+
+## Session 26-27-Aug-2026 — frozen-quote incident, ledger decommissioned as a live source, reconciliation check built
+
+### Incident: KPITTECH/NATIONALUM marked FILLED against a quote a same-day fix had already superseded
+
+`daily_report._solve_shares_to_slot`'s tie-break logic was fixed (prefer the lower-price candidate on a deviation tie — see its docstring) *after* the real 25-Aug expiry-evening `open_window()` call had already run and frozen the pre-fix quote (601.47/400.98) into `entry_tracking.json` for KPITTECH/NATIONALUM. The Day-1 fill check ran against that stale, too-generous quote, marked both FILLED, and `book.json` carried two phantom positions with zero real backing — the actual quotes investors were given (~579.79/391.32, communicated ahead of the automated message) never touched the day's low, so neither ever actually filled. Root cause is a general shape, not specific to this bug: `open_window()`/`advance()` compute a quote once and freeze it for the life of a stage; nothing previously re-checked a frozen value against current code.
+
+Fixed live (backups taken first): both reverted to `status: pending` at the real quote in `book.json` and `entry_tracking.json`; the phantom `book.json` rows removed, then correctly restored as `seed_pending`-style blank placeholders (the canonical shape, not a full delete) via an unrelated audit-script side effect.
+
+### `entry_tracking.reconcile()` / `apply_reconcile_fixes()` — the actual guard against a repeat
+
+`entry_tracking.py` now exposes `reconcile(state=None, path=None)`: recomputes today's quote fresh, per pending symbol, using the exact same functions `open_window()`/`advance()` call (`_compute_stock_entry_band`/`_solve_shares_to_slot` for a Day-1 quote; the new shared `_vol_requote(close, sigma)` — factored out of `advance()`'s two inline Day-2/Day-3 formulas so there is one implementation, not two that could drift — for a Day-2/3 re-quote), and diffs it against the frozen `quote_price`. Returns a list of mismatches; empty means clean. `apply_reconcile_fixes(mismatches, state, path)` writes `current_code_quote` back programmatically (recomputing `shares`/`sl_price`/`exit_price` from it) with no manual transcription step between "the check found X" and "the file has X" — built after the first hand-applied fix (typing the corrected quote from `reconcile()`'s printed output into a new script) was itself flagged as the same transcription-risk class this check exists to eliminate.
+
+First real-world run of `reconcile()` against live data immediately caught a second, genuine bug: the manual fix above corrected KPITTECH/NATIONALUM's status but left `quote_price` frozen at the Day-1 number instead of the Day-2 re-quote (594.43/403.11) that should have replaced it the moment the Day-1 miss was recorded (`sessions` already showed Day-1 as applied). Fixed via `apply_reconcile_fixes()`; also found and corrected a second stale leftover — `advance()`'s own internal `history` field (distinct from the `fill_history` written to `book.json`) still carried the old, wrong Day-1 "filled" record, which would have fed into the next real `advance()` call unless corrected. Verified clean via a full re-run of `reconcile()` (zero mismatches) and a fresh `render()`.
+
+### Dormant per-symbol target/stop landmine closed
+
+`book.open_position()` now accepts and stores `target_pct`/`stop_pct` (all four `entry_tracking.py` fill call sites — Day1, Day2, Day3, market-buy/REBASE — pass them through). `cycle_state.py`'s PENDING→HOLD transition reads them from the book row when present, falling back to the window's flat rate for older rows. Previously `cycle_state.py` always re-derived stop/target from its own flat, window-level percentages — harmless only because `LLM_TARGET_ENABLED = False` today, so every symbol shares one target and the two numbers coincide. The moment that flag is turned on (the per-symbol-target code path already exists, dormant, in `daily_report.py`/`llm_judgment.py`), the flat re-derivation would have silently diverged from what the investor was actually quoted. Verified against three scratch cases: a genuine per-symbol-target scenario, a legacy row with no stored percentages, and the no-book-record fallback.
+
+### `ledger.jsonl` demoted to audit-only; `book.performance()` built
+
+`ledger.performance()`/`monthly_summary()` fed the live "Performance to date" investor message (`run_strategy.py`'s `cmd_perf`/`cmd_sheet`) from a single `mtd_return_pct` frozen into `ledger.jsonl` once per day and never revisited — exactly why the REBASE correction to `book_archive.jsonl` (see the 25-Aug session below) never showed up in what investors were told: nothing ever re-derived the number after the correction. Per explicit instruction, `ledger.jsonl` is audit-only from here forward (a permanent record of what was said, for checking later whether the notes were right — `record_note()` still writes it) — nothing in the live pipeline reads it for a current number any more.
+
+New `book.performance(path=None)` computes the same two cumulative conventions (`absolute_sum` additive, `absolute_comp`/`cagr` compounded) live, every call, from `book_archive.jsonl`'s `kind=="actual"` records plus `book.json`'s still-open positions marked to market via `cycle_state.json`'s live `last_close` cursor (legitimate, non-duplicated data — today's price, not a copy of entry/stop/target; `cycle_state.json` only ever holds the current cycle, so this only applies there). Same output shape as the old function, so `daily_report.render_performance()` needed no changes. `run_strategy.py`'s two live call sites (`cmd_perf`, `cmd_sheet`) switched over. Verified the formula against `cycle_state.to_report()`'s exact convention (`sum(pnl_pct) / config.PORTFOLIO_SIZE`) with non-trivial numbers, and verified the actual fix end-to-end: corrected a test archive record, called `performance()` again with zero other action, and the number updated immediately. Real effect on live data: the Aug (2026-07-28 expiry) figure moved from the stale 4.29% to the correct 5.44%, automatically, with no ledger write.
+
+### Two structural things considered and explicitly rejected the same night
+
+A full merge of `entry_tracking.json`'s temporal (not-yet-filled) state into `book.json` was attempted, then reverted. It solved a problem that never existed — a pending order has no row in `book.json` at all, so there was nothing there to go stale relative to a second copy — and introduced two real bugs while being built (an `entry_price`/`entry_date` leak where a stale in-memory copy overwrote a fresh `book.open_position()` write moments later; a clobber-guard needed for continuing-HOLD `shares`/`risk_anchor` to avoid overwriting a real position's live basis with next month's unexecuted plan a day early). `entry_tracking.json` stays a separate file, by design: it is genuinely a different concern (multi-day limit-chase state for something that isn't a position yet) from `book.json` (confirmed positions only), not an accidental duplicate.
+
+Also decided: `cycle_state.json`'s full-overwrite-with-no-history behavior on every `open_cycle()` call does not need fixing — explicitly not required to be auditable; `ledger.jsonl`/`notes/*.txt` already cover the "what was said" audit need, and `cycle_state.json`'s own job (avoid re-ranking 208 symbols over 260 days every evening) is legitimate and unrelated.
+
+### Dead data files removed
+
+`data/backtest_result.json`, `backtest_result_v2.json`, `v4_backtest.json`, `latest.json` (referenced only by `legacy/*.py`), `carry_forward_v5.json` (a standalone research script, not the live pipeline), `fill_realism_v6_3stage.jsonl` (the backtest script's own scratch output, superseded by `book_archive.jsonl`) — confirmed unreferenced by anything live, deleted (backed up to `/tmp/dead_data_backup/` first).
+
+### `entry_tracking.json` now self-clears once its window resolves
+
+`mark_final_sent()` deletes the state file instead of just flagging `final_sent=True` and leaving it in place. Nothing unique is lost — every fact worth keeping already transferred to `book.json` the moment each slot filled, and `ledger.jsonl`/`notes/*.txt` already hold the permanent record of what was sent — and a resolved-but-still-present file was pure downside: it could be misread as live state by anything that doesn't specifically check `final_sent` first, right up until the next expiry's `open_window()` silently overwrote it anyway. Verified: `load()`/`is_window_active()` already handle a missing file exactly like "no window yet."
+
+### Message formatting simplified
+
+`render()`'s FILLED/LIMIT BUY/MANDATORY sections were two lines per stock (Entry/Qty, then SL/Exit) with no blank line between stocks — read as a wall of text on Telegram. Changed to one line per stock (`SYMBOL: N qty @ price  SL: X  Exit: Y`), explicit request.
+
 ## Pending Tasks
 
 - **New, separate strategy: push-based long-term strategy identification.**
@@ -1090,13 +1483,19 @@ Exited section, right after CONTINUE TO HOLD). 58/58 tests pass.
 - **Split-guard `from52wh`** -- BAJFINANCE read -87.9% below its 52w high
   on 31-Jul-2026; that was a bonus, not a drawdown. `PICKING_METHOD.md`
   depends on this feature.
-- **Make `adjust_holding_window` call `corporate_actions.classify`**
-  instead of the fixed [0.72, 1.40] band.
+- **Give `split_adjust` (selection scoring) a grey-zone concept**, so a
+  moderate bonus (e.g. ratio 0.80, inside the hard band) gets classifier
+  review the same way it already does during holding P&L, instead of
+  being silently treated as a genuine price move. Selection has no
+  per-symbol restriction to lean on (it scores the whole universe by
+  design), so this needs its own cost thought, not a copy-paste of the
+  `_held` restriction.
 - ~~No fresh-start additive runner~~ DONE 03-Aug-2026: `research/run13.py`.
-- **Add a cost cap so grey-zone corporate-action classification can be
-  turned on.** `CORP_ACTION_GREY_ZONE_ENABLED` is False because one NSE
-  fetch plus one LLM call per breach per symbol made `daily_report.build`
-  time out. A held-symbols-only call list would make it affordable.
+- ~~Add a cost cap so grey-zone corporate-action classification can be
+  turned on~~ DONE 25-Aug-2026: the cap already existed
+  (`simulate_month` restricts `adjust_holding_window` to `_held`,
+  ~10 symbols, since 03-Aug-2026) -- verified empirically and turned
+  `CORP_ACTION_GREY_ZONE_ENABLED` back on.
 - ~~Revert the losing config~~ DONE 02-Aug-2026.
 - ~~Regime-pegged stop~~ DONE 02-Aug-2026 (breadth, 45% threshold).
 - ~~Validate the regime stop on the other 8 cycles~~ DONE. All 13 run

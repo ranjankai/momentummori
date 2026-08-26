@@ -29,11 +29,37 @@ agreed, see section 12's superseding note):
 
 RISK ANCHOR
 -----------
-Stop and target are ALWAYS computed off Day-1's actual market open -- the
-"arrival price" / decision price in Perold's (1988) Implementation
-Shortfall framework -- never off wherever the delayed fill actually
-happened. A late, higher fill must not inherit a stop that has crept
-toward the market purely because the entry was late.
+Simple rule (26-Aug-2026, refined twice the same day): stop and target
+are always measured off the MIN-BASKET PRICE that stage's share count
+was actually sized against -- Day 1's quoted band limit, Day 2's
+Parkinson re-quote, or Day 3's pooled-vol indicative estimate -- never
+off wherever the fill actually executed, even when that differs (a
+same-day gap through the limit, or Day 3's mandatory open). One number
+governs both how many shares get bought and where the risk sits; the
+actual execution price only matters for the P&L, never for the risk
+band.
+
+The one place this does NOT apply: the gap-risk abort check before
+attempting Day 2 or Day 3 (below) deliberately stays pegged to Day-1's
+actual open throughout, regardless of which stage's quote governs a
+FILL -- that check asks "has this already broken the level we accepted
+when we first decided to enter this month", which is a Day-1-anchored
+question by definition, not a per-stage one.
+
+History: this used to anchor EVERY fill to Day-1's open regardless of
+which day or price it actually filled at, on the theory (Perold, 1988,
+Implementation Shortfall) that a DELAYED fill must not inherit a stop
+dragged toward a market that moved while waiting -- real evidence,
+PNBHOUSING and BSE both got stopped from delayed, higher fills. Applying
+that same rule to a same-day fill was never evidenced and broke the one
+promise the message makes: ADANIGREEN's real 28-Jul cycle quoted and
+filled Day 1 at 1367.44 against a 1383.10 open; anchoring to the open
+gave a stop of 1313.945 (-3.91% off the real entry, not -5%) and
+triggered a session early. First fix re-anchored to the actual fill
+price; second fix (this one) re-anchors to the QUOTED min-basket price
+instead, since that is the number the share count was sized against --
+the two coincide whenever a limit fills without gapping through it (the
+ADANIGREEN case), and only diverge when the open gaps below the quote.
 
 GAP-RISK ABORT
 --------------
@@ -120,7 +146,34 @@ def _parkinson_sigma(row) -> float:
     return math.log(h / l) / (2.0 * math.sqrt(math.log(2)))
 
 
+def _vol_requote(close: float, sigma: float) -> float:
+    """
+    The Day-2/Day-3 80%-probability re-quote formula, factored out (26-Aug-
+    2026) so advance() and reconcile() below call the exact same function
+    instead of two copies that could quietly drift apart -- the same class
+    of mistake as the KPITTECH tie-break bug, just one level removed: that
+    bug was one function whose already-frozen OUTPUT went stale after a
+    fix; a hand-duplicated formula here would be two IMPLEMENTATIONS that
+    could disagree even on fresh input. One formula, one place.
+    """
+    return round(close * math.exp(Z80 * sigma), 2)
+
+
 def load(path: str = None) -> dict:
+    """
+    entry_tracking.json holds TEMPORAL state only -- the day-by-day limit-
+    chase machinery for a NOT-YET-settled order (which stage, what's
+    currently quoted, has it breached the abort level). It never
+    duplicates a fact book.json also stores: a pending order has no row
+    in book.json at all until it fills, so there's nothing here for a
+    code fix to leave stale relative to a second copy. (26-Aug-2026: a
+    same-file merge with book.json was attempted and reverted -- it
+    solved a problem this split never had, and introduced two real
+    correctness bugs in the process; see git history / conversation log
+    if reviving that idea.) book.json remains the sole place a FILLED
+    position's price/shares live -- open_position()/close_position() are
+    the only writers of those fields, from here.
+    """
     path = path or STATE_FILE
     if not os.path.exists(path):
         return None
@@ -267,6 +320,10 @@ def open_window(expiry: date, symbols: list, stop_pct: float,
         "stocks": stocks,
     }
     save(state, path)
+    # 25-Aug-2026: give the book a complete row for every name in tonight's
+    # basket immediately, not just whichever ones happen to already be a
+    # real HOLD -- see book.seed_pending's docstring.
+    book.seed_pending(symbols, expiry)
     logger.info("Opened entry-tracking window for %s: %d names, slot Rs %.0f",
                expiry, len(stocks), slot_target)
     return state
@@ -311,6 +368,8 @@ def advance(state: dict, day: date, path: str = None) -> dict:
         opn = float(row.get("open_price", 0) or 0)
         close = float(row.get("close_price", 0) or 0)
 
+        hist = d.setdefault("history", {})
+
         if n == 1:
             if opn <= 0:
                 # No usable open today -- can't establish an anchor. Leave
@@ -318,8 +377,13 @@ def advance(state: dict, day: date, path: str = None) -> dict:
                 # Rs 0 anchor propagating into SL/exit downstream.
                 logger.warning("No valid open for %s on %s; retrying next session", sym, day)
                 continue
-            # Anchor is now knowable regardless of fill, and never changes
-            # again -- every later stage's stop/target stays pinned here.
+            # Provisional anchor, off today's open. This is the correct
+            # basis for anything that DOESN'T fill today (the Day-2/3
+            # gap-abort check just below needs a number now, before any
+            # fill is known) -- but a name that fills TODAY re-anchors to
+            # its own fill price a few lines down (26-Aug-2026 fix: see
+            # that branch's comment for why opn was wrong for a same-day
+            # limit fill).
             d["risk_anchor"] = opn
             anchor_stop = opn * (1 - stop_pct / 100.0)
             d["sl_price"] = round(anchor_stop, 2)
@@ -335,9 +399,38 @@ def advance(state: dict, day: date, path: str = None) -> dict:
             # same reasoning as an existing investor's TOP-UP execution.
             # Always fills on Day 1, unconditionally, at the real open.
             if d.get("market_buy"):
+                hist["day1"] = {"date": str(day), "proposed_price": "market_open",
+                                "filled": True, "fill_price": round(opn, 2)}
                 d.update(status="filled", filled_day=1, price=round(opn, 2))
-                book.open_position(sym, d["shares"], opn, day, state["expiry"])
+                # Archive the OUTGOING record before rebasing it (26-Aug-
+                # 2026 fix): book.open_position() below unconditionally
+                # overwrites book[sym], and until this fix nothing ever
+                # archived what was there first. A continuing HOLD's real
+                # cost basis/entry_date/fill_history from the PRIOR cycle
+                # was silently destroyed every month this ran -- caught
+                # via TRENT/BANDHANBNK/POWERINDIA/GVT&D's real 29-Jul
+                # entries vanishing with zero trace in book_archive.jsonl
+                # when they were marked to the 26-Aug open. This is a
+                # REBASE, not a sale -- economically a non-event, same
+                # mark-to-market the carry-forward design always intended
+                # -- so it archives at the SAME price/date the new record
+                # opens at, purely to preserve the outgoing holding period
+                # for later questions like "what did this cycle actually
+                # hold" (book.holdings_for_expiry).
+                prior = book.get(sym)
+                if prior is not None and prior.get("entry_price") is not None:
+                    book.close_position(sym, exit_price=opn, exit_date=day,
+                                        reason="REBASE")
+                book.open_position(sym, d["shares"], opn, day, state["expiry"],
+                                   risk_anchor=opn, fill_history=hist,
+                                   target_pct=d.get("target_pct", state["target_pct"]),
+                                   stop_pct=state["stop_pct"])
                 continue
+
+            # Snapshot BEFORE any mutation below -- this is the Day-1
+            # 20-day-band limit actually quoted on Day 0, which a miss
+            # overwrites in place with the Day-2 re-quote a few lines down.
+            day1_quote = d["quote_price"]
 
             # Fill check FIRST, always -- the abort threshold sits below
             # the quoted price in effectively every real case, so a
@@ -346,9 +439,43 @@ def advance(state: dict, day: date, path: str = None) -> dict:
             # first would wrongly abandon something that actually filled.
             if low > 0 and low <= d["quote_price"]:
                 fill_price = min(opn, d["quote_price"])
+                # Re-anchor to the ACTUAL fill price, not the open (26-Aug-
+                # 2026 fix). The open-anchor rule exists to stop a DELAYED
+                # (Day-2/3) fill from dragging the stop toward a market
+                # that has moved in the meantime -- there is no such delay
+                # here, the fill happened today, at this price, full stop.
+                # Anchoring to the open anyway means a limit that fills
+                # BELOW the open (a genuinely good entry -- the whole
+                # point of quoting a limit under the open at all) gets a
+                # stop measured from a price never paid: found on
+                # ADANIGREEN's real 28-Jul cycle, quoted/filled 1367.44
+                # against a 1383.10 open, anchor-off-open put the stop at
+                # 1313.945 (-3.91% from the real entry, not -5%) and
+                # triggered it a full session earlier than an entry-based
+                # 5% stop (1299.07) would have. "SL: -5%" in the message
+                # must mean 5% off what was actually paid.
+                # Anchor to the QUOTED min-basket price, not the fill price
+                # (26-Aug-2026 refinement, same day as the fix above): the
+                # share count was sized against day1_quote, so the risk
+                # band should be measured off the same number the sizing
+                # was -- one price governs both, simple and consistent.
+                # This only differs from fill_price when the open itself
+                # gapped BELOW the quote (a better-than-planned entry);
+                # ADANIGREEN filled AT its quote with no gap, so this
+                # matches the fix above exactly for that real case.
+                d["risk_anchor"] = day1_quote
+                anchor_stop = day1_quote * (1 - stop_pct / 100.0)
+                d["sl_price"] = round(anchor_stop, 2)
+                sym_target_pct = d.get("target_pct", state["target_pct"])
+                d["exit_price"] = round(day1_quote * (1 + sym_target_pct / 100.0), 2)
+                hist["day1"] = {"date": str(day), "proposed_price": day1_quote,
+                                "filled": True, "fill_price": round(fill_price, 2)}
                 d.update(status="filled", filled_day=1, price=round(fill_price, 2))
-                book.open_position(sym, d["shares"], fill_price, day, state["expiry"])
+                book.open_position(sym, d["shares"], fill_price, day, state["expiry"],
+                                   risk_anchor=day1_quote, fill_history=hist,
+                                   target_pct=sym_target_pct, stop_pct=state["stop_pct"])
                 continue
+            hist["day1"] = {"date": str(day), "proposed_price": day1_quote, "filled": False}
             if low > 0 and low <= anchor_stop:
                 d.update(status="aborted", aborted_stage="before_day2")
                 continue
@@ -366,9 +493,23 @@ def advance(state: dict, day: date, path: str = None) -> dict:
                 lo, hi, _ = daily_report._compute_stock_entry_band(sym, {day: frame}, close or opn)
                 d["quote_price"] = round(hi, 2)
             else:
-                p80 = close * math.exp(Z80 * sigma1)
-                d["quote_price"] = round(p80, 2)
+                d["quote_price"] = _vol_requote(close, sigma1)
             d["shares"] = max(1, round(slot_target / d["quote_price"]))
+            # Preview refresh (26-Aug-2026 fix): sl_price/exit_price above
+            # were computed off `opn` (today's open) as a provisional
+            # stand-in before any real quote existed -- correct for the
+            # gap-abort check, but stale as an investor-facing preview
+            # now that Day-2's real re-quote is known. A message rendered
+            # tonight would otherwise show a "Limit buy" at the NEW quote
+            # next to an SL/Exit still measured off today's open -- caught
+            # via KALYANKJIL/NAM-INDIA's real 26-Aug pending rows, where
+            # both diverged from a flat 5%/40% off the quote. Same
+            # "whichever price the fill would anchor to" rule the FILL
+            # branches already use; risk_anchor itself is untouched here,
+            # it must stay the Day-1 open for the abort-check above.
+            sym_target_pct = d.get("target_pct", state["target_pct"])
+            d["sl_price"] = round(d["quote_price"] * (1 - stop_pct / 100.0), 2)
+            d["exit_price"] = round(d["quote_price"] * (1 + sym_target_pct / 100.0), 2)
 
         elif n == 2:
             if opn <= 0:
@@ -376,12 +517,31 @@ def advance(state: dict, day: date, path: str = None) -> dict:
                 continue
             anchor = d["risk_anchor"]
             anchor_stop = anchor * (1 - stop_pct / 100.0)
+            day2_quote = d["quote_price"]
             # Fill check first, same reasoning as Day 1.
             if low > 0 and low <= d["quote_price"]:
                 fill_price = min(opn, d["quote_price"])
+                # Same re-anchor as Day 1: this fill is not delayed past
+                # its own decision day, so it anchors to day2_quote (what
+                # its own share count was sized against), not Day-1's
+                # open. `anchor` (Day-1's open) stays the ABORT-CHECK
+                # threshold above -- that one genuinely needs to ask "has
+                # this already broken through the ORIGINAL Day-1 level"
+                # -- but the risk_anchor actually recorded on a fill is
+                # the fill's own stage.
+                d["risk_anchor"] = day2_quote
+                anchor_stop_out = day2_quote * (1 - stop_pct / 100.0)
+                d["sl_price"] = round(anchor_stop_out, 2)
+                sym_target_pct = d.get("target_pct", state["target_pct"])
+                d["exit_price"] = round(day2_quote * (1 + sym_target_pct / 100.0), 2)
+                hist["day2"] = {"date": str(day), "proposed_price": day2_quote,
+                                "filled": True, "fill_price": round(fill_price, 2)}
                 d.update(status="filled", filled_day=2, price=round(fill_price, 2))
-                book.open_position(sym, d["shares"], fill_price, day, state["expiry"])
+                book.open_position(sym, d["shares"], fill_price, day, state["expiry"],
+                                   risk_anchor=day2_quote, fill_history=hist,
+                                   target_pct=sym_target_pct, stop_pct=state["stop_pct"])
                 continue
+            hist["day2"] = {"date": str(day), "proposed_price": day2_quote, "filled": False}
             if low > 0 and low <= anchor_stop:
                 d.update(status="aborted", aborted_stage="before_day3")
                 continue
@@ -401,14 +561,22 @@ def advance(state: dict, day: date, path: str = None) -> dict:
                 lo, hi, _ = daily_report._compute_stock_entry_band(sym, {day: frame}, close or opn)
                 d["quote_price"] = round(hi, 2)
             else:
-                p80 = close * math.exp(Z80 * pooled_sigma)
-                d["quote_price"] = round(p80, 2)
+                d["quote_price"] = _vol_requote(close, pooled_sigma)
             d["shares"] = max(1, round(slot_target / d["quote_price"]))
+            # Same preview refresh as the Day-1-miss branch above -- the
+            # Day-3 quote just changed, so the preview must move with it.
+            # `anchor` (risk_anchor, Day-1's open) is untouched, still the
+            # abort-check basis.
+            sym_target_pct = d.get("target_pct", state["target_pct"])
+            d["sl_price"] = round(d["quote_price"] * (1 - stop_pct / 100.0), 2)
+            d["exit_price"] = round(d["quote_price"] * (1 + sym_target_pct / 100.0), 2)
 
         elif n == 3:
             anchor = d["risk_anchor"]
             anchor_stop = anchor * (1 - stop_pct / 100.0)
+            day3_quote = d["quote_price"]
             if opn > 0 and opn <= anchor_stop:
+                hist["day3"] = {"date": str(day), "proposed_price": day3_quote, "filled": False}
                 d.update(status="aborted", aborted_stage="day3_open_itself")
                 continue
             if opn <= 0:
@@ -418,9 +586,23 @@ def advance(state: dict, day: date, path: str = None) -> dict:
                 logger.warning("No valid open for %s on %s; Day-3 buy retried next session", sym, day)
                 continue
             # Mandatory: fills at the actual open, no limit, using the
-            # share count already locked in on Day 2's evening.
+            # share count already locked in on Day 2's evening. Anchors to
+            # day3_quote -- the SAME indicative price the share count was
+            # sized against the evening before -- not the actual open it
+            # executes at, matching Day 1/2's re-anchor above: one number
+            # governs both sizing and risk, and the mandatory buy's price
+            # is not known until the moment it fires, so the plan made the
+            # evening before is the only number to be consistent with.
+            anchor_stop_out = day3_quote * (1 - stop_pct / 100.0)
+            d["sl_price"] = round(anchor_stop_out, 2)
+            sym_target_pct = d.get("target_pct", state["target_pct"])
+            d["exit_price"] = round(day3_quote * (1 + sym_target_pct / 100.0), 2)
+            hist["day3"] = {"date": str(day), "proposed_price": day3_quote,
+                            "filled": True, "fill_price": round(opn, 2)}
             d.update(status="filled", filled_day=3, price=round(opn, 2))
-            book.open_position(sym, d["shares"], opn, day, state["expiry"])
+            book.open_position(sym, d["shares"], opn, day, state["expiry"],
+                               risk_anchor=day3_quote, fill_history=hist,
+                               target_pct=sym_target_pct, stop_pct=state["stop_pct"])
 
         else:
             # Day 4+: nothing should still be open at this point (Day 3 is
@@ -433,6 +615,164 @@ def advance(state: dict, day: date, path: str = None) -> dict:
         if all(d["status"] in ("filled", "aborted", "no_data")
                for d in state["stocks"].values()):
             state["resolved_as_of"] = str(day)
+
+    save(state, path)
+    return state
+
+
+def reconcile(state: dict = None, path: str = None) -> list:
+    """
+    Recomputes today's quote, fresh, for every still-pending symbol in the
+    given (or loaded) window using CURRENT code, and diffs it against the
+    frozen quote_price actually sitting in state. Returns a list of
+    mismatches -- empty means every frozen quote still matches what the
+    code would produce if asked again right now.
+
+    THE GAP THIS CLOSES (26-Aug-2026): open_window()/advance() compute a
+    quote ONCE and freeze it for the life of that stage. If daily_report.
+    py's pricing logic (or this module's own _vol_requote/_parkinson_
+    sigma) changes while a window is already open, nothing previously
+    noticed that an already-quoted, still-pending price no longer matches
+    what the code would say if asked again -- which is exactly how
+    KPITTECH/NATIONALUM ended up marked FILLED against a quote a same-day
+    tie-break fix had already superseded. Call this before any message
+    sends, or any time daily_report.py's pricing functions change, to get
+    a loud, explicit mismatch instead of a silent stale one.
+
+    Deliberately reuses the SAME functions open_window()/advance() call
+    (_compute_stock_entry_band, _solve_shares_to_slot for a Day-1 quote;
+    _vol_requote for a Day-2/3 re-quote) rather than a second, hand-
+    written formula -- a duplicate implementation here would just be this
+    exact bug class one level up, the mistake already made and reverted
+    once tonight in a different form.
+    """
+    if state is None:
+        state = load(path)
+    if state is None:
+        return []
+
+    mismatches = []
+    sessions = state.get("sessions", [])
+    n = len(sessions)
+
+    for sym, d in state["stocks"].items():
+        if d.get("status") != "pending" or d.get("market_buy"):
+            continue  # market_buy names never carry a real limit to check
+
+        frozen = d.get("quote_price")
+        if frozen is None:
+            continue
+
+        fresh_price = None
+        if n == 0:
+            # Still on the original Day-0/Day-1 band quote -- recompute
+            # exactly like open_window() did.
+            expiry_dt = date.fromisoformat(state["expiry"])
+            hist = strategy.load_price_history(expiry_dt, strategy.load_fo_universe())
+            hist_dates = sorted(hist.keys())
+            sig_frame = hist.get(expiry_dt) if expiry_dt in hist else hist.get(hist_dates[-1])
+            if sig_frame is None or sym not in sig_frame.index:
+                continue
+            close = float(sig_frame.loc[sym, "close_price"])
+            if close <= 0:
+                continue
+            lo, hi, _ = daily_report._compute_stock_entry_band(sym, hist, close)
+            _n_shares, fresh_price, _dev = daily_report._solve_shares_to_slot(
+                state["slot_target"], {"close": close, "entry_lo": lo, "entry_hi": hi})
+        elif not d.get("mandatory"):
+            # Day-2 re-quote: re-derive from Day-1's own realized H/L --
+            # historical fact by now, it cannot itself change.
+            day1 = date.fromisoformat(sessions[0])
+            frame = cycle_state.frame_for(day1)
+            if frame is None or sym not in frame.index:
+                continue
+            row = frame.loc[sym]
+            close = float(row.get("close_price", 0) or 0)
+            sigma1 = _parkinson_sigma(row)
+            if sigma1 is None or close <= 0:
+                opn = float(row.get("open_price", 0) or 0)
+                lo, hi, _ = daily_report._compute_stock_entry_band(sym, {day1: frame}, close or opn)
+                fresh_price = round(hi, 2)
+            else:
+                fresh_price = _vol_requote(close, sigma1)
+        else:
+            # Day-3 pooled re-quote: re-derive from Day-1 AND Day-2's
+            # realized H/L.
+            if len(sessions) < 2:
+                continue
+            day1, day2 = date.fromisoformat(sessions[0]), date.fromisoformat(sessions[1])
+            frame1, frame2 = cycle_state.frame_for(day1), cycle_state.frame_for(day2)
+            if frame2 is None or sym not in frame2.index:
+                continue
+            row2 = frame2.loc[sym]
+            close = float(row2.get("close_price", 0) or 0)
+            sigma1 = (_parkinson_sigma(frame1.loc[sym])
+                     if frame1 is not None and sym in frame1.index else None)
+            sigma2 = _parkinson_sigma(row2)
+            sigmas = [s for s in (sigma1, sigma2) if s is not None]
+            pooled = sum(sigmas) / len(sigmas) if sigmas else None
+            if pooled is None or close <= 0:
+                opn2 = float(row2.get("open_price", 0) or 0)
+                lo, hi, _ = daily_report._compute_stock_entry_band(sym, {day2: frame2}, close or opn2)
+                fresh_price = round(hi, 2)
+            else:
+                fresh_price = _vol_requote(close, pooled)
+
+        if fresh_price is not None and abs(fresh_price - frozen) > 0.01:
+            mismatches.append({
+                "symbol": sym,
+                "frozen_quote": frozen,
+                "current_code_quote": fresh_price,
+                "delta": round(fresh_price - frozen, 2),
+                "stage": "day1" if n == 0 else ("day3" if d.get("mandatory") else "day2"),
+            })
+    return mismatches
+
+
+def apply_reconcile_fixes(mismatches: list, state: dict = None, path: str = None) -> dict:
+    """
+    Applies reconcile()'s own findings directly -- no manual transcription
+    step between "the check computed X" and "the file gets X" (26-Aug-2026,
+    explicit ask: hand-retyping a number the check already computed is
+    exactly the failure mode this check exists to eliminate, and it's how
+    the FIRST live use of reconcile() tonight was itself fixed -- by hand,
+    from the printed output, which defeated half the point).
+
+    For each mismatch, writes mismatch["current_code_quote"] as the new
+    quote_price and recomputes shares/sl_price/exit_price from it using
+    the exact same formulas advance() uses. Never touches fill_history/
+    history (the permanent record of what was actually quoted/filled on a
+    PAST day) -- only the live, still-open quote and what's derived from
+    it. reconcile() already restricts its findings to status=="pending",
+    non-market_buy symbols, so anything in `mismatches` is safe to touch
+    this way by construction.
+
+    Returns the updated state; does not decide anything on its own --
+    still call reconcile() again afterward and look at the result before
+    trusting it, same as any other change here tonight.
+    """
+    if state is None:
+        state = load(path)
+    if state is None or not mismatches:
+        return state
+
+    slot_target = state["slot_target"]
+    stop_pct = state["stop_pct"]
+
+    for m in mismatches:
+        sym = m["symbol"]
+        d = state["stocks"].get(sym)
+        if d is None:
+            continue
+        new_quote = m["current_code_quote"]
+        old_quote = d["quote_price"]
+        d["quote_price"] = new_quote
+        d["shares"] = max(1, round(slot_target / new_quote))
+        sym_target_pct = d.get("target_pct", state["target_pct"])
+        d["sl_price"] = round(new_quote * (1 - stop_pct / 100.0), 2)
+        d["exit_price"] = round(new_quote * (1 + sym_target_pct / 100.0), 2)
+        logger.warning("reconcile: %s quote %.2f -> %.2f (shares %d, sl %.2f, exit %.2f)",
+                       sym, old_quote, new_quote, d["shares"], d["sl_price"], d["exit_price"])
 
     save(state, path)
     return state
@@ -455,8 +795,29 @@ def is_window_active(state: dict) -> bool:
 
 
 def mark_final_sent(state: dict, path: str = None) -> None:
-    state["final_sent"] = True
-    save(state, path)
+    """
+    Called the same evening the window resolves, right after the final
+    "every slot filled or dropped" message has already been rendered and
+    recorded (cmd_daily's order: advance -> render -> record -> this).
+
+    Deletes entry_tracking's own state file rather than leaving it around
+    flagged final_sent=True (26-Aug-2026 change, explicit ask: "flush it
+    once its job is done else somebody might misread some data from it").
+    Nothing unique is lost -- every fact worth keeping already transferred
+    to book.json the moment each slot actually filled (see load()'s
+    docstring), and ledger.jsonl/notes/*.txt already hold the permanent,
+    append-only record of what was actually sent. A resolved-but-still-
+    present entry_tracking.json is pure downside: it looks like live state
+    to anything that doesn't specifically check final_sent first, right up
+    until the next expiry's open_window() silently overwrites it anyway.
+    Deleting it makes "no active window" the same thing as "no file",
+    which is also exactly what load() already treats a missing file as.
+    """
+    path = path or STATE_FILE
+    if os.path.exists(path):
+        os.remove(path)
+    logger.info("Entry-tracking window for %s resolved and sent -- state file cleared",
+               state.get("expiry"))
 
 
 # ---------------------------------------------------------------------------
@@ -560,33 +921,37 @@ def render(state: dict) -> str:
     aborted = [(s, d) for s, d in state["stocks"].items() if d["status"] == "aborted"]
     no_data = [(s, d) for s, d in state["stocks"].items() if d["status"] == "no_data"]
 
+    # 26-Aug-2026: one line per stock instead of two -- explicit ask, the
+    # two-line-per-stock layout read as a wall of text on Telegram.
     if filled:
         L.append("<b>FILLED</b>")
         for sym, d in filled:
-            L.append(f"<b>{esc(sym)}</b>  (Day {d['filled_day']})  "
-                     f"Entry: {daily_report._fmt_money(d['price'])}  Qty: {d['shares']:,}")
-            L.append(f"    SL: {daily_report._fmt_money(d['sl_price'])}   "
+            L.append(f"<b>{esc(sym)}</b>: {d['shares']:,} qty @ "
+                     f"{daily_report._fmt_money(d['price'])}  (Day {d['filled_day']})  "
+                     f"SL: {daily_report._fmt_money(d['sl_price'])}  "
                      f"Exit: {daily_report._fmt_money(d['exit_price'])}")
         L.append("")
 
     if pending_limit:
         L.append("<b>LIMIT BUY — TOMORROW (re-priced, Day-1 limit missed)</b>")
         for sym, d in pending_limit:
-            L.append(f"<b>{esc(sym)}</b>  Limit buy: {daily_report._fmt_money(d['quote_price'])}  "
-                     f"Qty: {d['shares']:,}")
+            sl_exit = ""
             if d.get("sl_price") is not None:
-                L.append(f"    SL: {daily_report._fmt_money(d['sl_price'])}   "
-                         f"Exit: {daily_report._fmt_money(d['exit_price'])}")
+                sl_exit = (f"  SL: {daily_report._fmt_money(d['sl_price'])}  "
+                          f"Exit: {daily_report._fmt_money(d['exit_price'])}")
+            L.append(f"<b>{esc(sym)}</b>: {d['shares']:,} qty @ "
+                     f"{daily_report._fmt_money(d['quote_price'])}{sl_exit}")
         L.append("")
 
     if pending_mandatory:
         L.append("<b>MANDATORY MARKET BUY — TOMORROW</b>")
         for sym, d in pending_mandatory:
-            L.append(f"<b>{esc(sym)}</b>  Expected ~{daily_report._fmt_money(d['quote_price'])}  "
-                     f"Qty: {d['shares']:,}  (no order to place — buys at tomorrow's open)")
+            sl_exit = ""
             if d.get("sl_price") is not None:
-                L.append(f"    SL: {daily_report._fmt_money(d['sl_price'])}   "
-                         f"Exit: {daily_report._fmt_money(d['exit_price'])}")
+                sl_exit = (f"  SL: {daily_report._fmt_money(d['sl_price'])}  "
+                          f"Exit: {daily_report._fmt_money(d['exit_price'])}")
+            L.append(f"<b>{esc(sym)}</b>: {d['shares']:,} qty @ "
+                     f"~{daily_report._fmt_money(d['quote_price'])} (market buy){sl_exit}")
         L.append("")
 
     if aborted or no_data:

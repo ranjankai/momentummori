@@ -1,0 +1,29 @@
+<b>AUGUST-SEP '26 PORTFOLIO - 26-Aug-2026</b>
+
+<b>FILLED</b>
+<b>TRENT</b>  (Day 1)  Entry: 2,950.00  Qty: 11
+    SL: 2,802.50   Exit: 4,130.00
+<b>BANDHANBNK</b>  (Day 1)  Entry: 174.00  Qty: 186
+    SL: 165.30   Exit: 243.60
+<b>POWERINDIA</b>  (Day 1)  Entry: 33,375.00  Qty: 1
+    SL: 31,706.25   Exit: 46,725.00
+<b>INOXWIND</b>  (Day 1)  Entry: 73.65  Qty: 441
+    SL: 69.97   Exit: 103.11
+<b>GVT&amp;D</b>  (Day 1)  Entry: 4,185.00  Qty: 8
+    SL: 3,975.75   Exit: 5,859.00
+<b>COFORGE</b>  (Day 1)  Entry: 1,903.60  Qty: 17
+    SL: 1,815.01   Exit: 2,674.76
+
+<b>LIMIT BUY — TOMORROW (re-priced, Day-1 limit missed)</b>
+<b>KALYANKJIL</b>  Limit buy: 614.94  Qty: 53
+    SL: 584.19   Exit: 860.92
+<b>KPITTECH</b>  Limit buy: 594.43  Qty: 55
+    SL: 564.71   Exit: 832.20
+<b>NATIONALUM</b>  Limit buy: 403.11  Qty: 81
+    SL: 382.95   Exit: 564.35
+<b>NAM-INDIA</b>  Limit buy: 1,232.94  Qty: 26
+    SL: 1,171.29   Exit: 1,726.12
+
+<b>Basket size so far (indicative): 326,503.67</b>
+
+<i>Please check the entry price / stop-loss / exit price above and update your order book accordingly.</i>

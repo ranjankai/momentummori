@@ -45,6 +45,7 @@ from datetime import date, timedelta
 
 import pandas as pd
 
+import book
 import config
 import nse_client
 import scoring
@@ -237,12 +238,48 @@ def apply_session(state: dict, day: date, frame, use_classifier=None) -> dict:
         h = h if h else c
         l = l if l else c
 
-        # entry day: fill at the open and freeze stop/target off it
+        # entry day: use the REAL fill (25-Aug-2026 fix -- book.json is
+        # the single source of truth for what was actually paid; this
+        # used to always assume "entry = today's open" regardless of
+        # what entry_tracking.py's real 3-stage mechanism actually did,
+        # a completely separate, disconnected assumption that silently
+        # diverged from reality any time a name filled on Day 2 or 3
+        # instead of Day 1. By the time cycle_state.build() first runs
+        # for a cycle, entry_tracking's window has already fully
+        # resolved (cmd_daily gates on is_window_active first), so a
+        # real book record should always exist here -- falling back to
+        # today's open only for the genuine edge case of no book record
+        # (e.g. a pre-book.py legacy position).
         if pos["status"] == "PENDING":
-            pos["entry"] = o
-            pos["entry_date"] = str(day)
-            pos["stop"] = o * (1 - stop_pct)
-            pos["target"] = o * (1 + target_pct)
+            book_pos = book.get(sym)
+            if book_pos and book_pos.get("entry_price") is not None:
+                entry = book_pos["entry_price"]
+                anchor = book_pos.get("risk_anchor") or entry
+                entry_date = book_pos.get("entry_date") or str(day)
+                # 26-Aug-2026 fix: use the PER-SYMBOL percentages this
+                # fill was actually quoted against, when book.json has
+                # them (entry_tracking.py now always passes them to
+                # book.open_position() -- see its 26-Aug-2026 addition).
+                # Falls back to this window's flat stop_pct/target_pct
+                # for older rows written before this field existed, or a
+                # non-book fallback entry (the `else` branch below) where
+                # there's no per-symbol figure to read in the first
+                # place. Without this fallback-aware read, a per-symbol
+                # target (config.LLM_TARGET_ENABLED) would be correctly
+                # quoted to the investor by entry_tracking.py but then
+                # silently re-derived wrong here, off this window's flat
+                # rate instead of what was actually promised.
+                sym_stop_pct = (book_pos.get("stop_pct", state["stop_pct"])) / 100.0
+                sym_target_pct = (book_pos.get("target_pct", state["target_pct"])) / 100.0
+            else:
+                entry = anchor = o
+                entry_date = str(day)
+                sym_stop_pct = stop_pct
+                sym_target_pct = target_pct
+            pos["entry"] = entry
+            pos["entry_date"] = entry_date
+            pos["stop"] = anchor * (1 - sym_stop_pct)
+            pos["target"] = anchor * (1 + sym_target_pct)
             pos["status"] = "HOLD"
             pos["last_close"] = c
             state["entry_date"] = state["entry_date"] or str(day)

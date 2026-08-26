@@ -969,11 +969,18 @@ would have missed a second limit attempt get into the basket a day
 earlier, at whatever day-2's open turns out to be, rather than waiting for
 a third day. Aborts stayed at 1/160 (0.6%), same order as before.
 
-The old 3-stage numbers and per-stock detail are preserved at
+The old 3-stage numbers and per-stock detail were preserved at
 `data/fill_realism_v5_3stage_backup.jsonl` for reference; the file used by
-the live `entry_tracking.py` module (`data/fill_realism_v5.jsonl`) now
-holds the 2-stage results, reproducible via `python
+the live `entry_tracking.py` module (`data/fill_realism_v5.jsonl`) then
+held the 2-stage results, reproducible via `python
 research/fill_realism_v5.py <year> <month>`.
+
+**STALE as of 25-Aug-2026 -- see section 16.** `entry_tracking.py` was
+reverted to 3 stages the very next day (14-Aug-2026) and this section was
+never updated to say so; `research/fill_realism_v5.py` and its data files
+modelled this now-abandoned 2-stage design and have since been deleted as
+dead code. The mechanism actually live today is 3-stage, backtested by
+`research/fill_realism_v6_3stage.py` / `data/fill_realism_v6_3stage.jsonl`.
 
 # 13. Carry-forward with HOLD rebalancing vs pure in-and-out, compounding (13-Aug-2026)
 
@@ -1188,3 +1195,509 @@ outliers (Oct/Nov-2025 previously reported at 16.12%/16.68%) now sit at
 10.68%/10.30% -- the underweight-hold distortion that produced them is
 gone, because holds no longer sit frozen below target while an
 unrelated expensive fresh pick inflates the slot around them.
+
+---
+
+# 16. Real 3-stage fill mechanism backtested; live entry-sheet sizing
+simplified; stale docs and dead research files cleaned up (25-Aug-2026)
+
+## What triggered this
+
+A real limit order (KPITTECH, then NATIONALUM, COFORGE, BANDHANBNK) was
+quoted ABOVE the stock's own last close in a live sheet -- clearly wrong.
+Root cause: `daily_report._solve_shares_to_slot` iterated its three
+candidate share counts `{n-1, n, n+1}` via an unordered Python `set`; on
+a near-tie in slot-fit deviation, whichever candidate the set happened to
+iterate first won, sometimes the higher-priced one. **Fixed**: on a tie
+(within 1e-6% deviation), prefer the lower price. A second, broader fix
+was tried (capping the upper price bound at `close` rather than
+`entry_hi`) and was WRONG -- section below quantifies why -- and was
+reverted.
+
+## Real returns were never actually measured against this
+
+Every number in sections 11-15 above is an idealized backtest: every
+name assumed to fill at the session open on day one. `entry_tracking.py`
+(the module that actually talks to investors) has run a real 3-stage
+process since the 14-Aug-2026 revert noted in section 12's stale-flag:
+Day-1 20-day volatility band, Day-2 re-quote off Day-1's own realized
+vol (only if Day-1 missed), Day-3 mandatory market fill anchored off
+Day-2's close (only if Day-2 missed too), with risk_anchor always pinned
+to Day-1's actual open regardless of which day the fill happened. No
+backtest of this exact live mechanism existed -- `fill_realism_v5.py`
+(section 11) modelled 3 stages but was superseded by a 2-stage version
+(section 12) the live code no longer matches, and neither script's
+sizing reflects tonight's own tie-break fix.
+
+**`research/fill_realism_v6_3stage.py`** is a direct, formula-for-formula
+port of `entry_tracking.py`'s current live mechanism into a backtest,
+sizing Day 1 via `daily_report._compute_min_portfolio_sizing` (so it
+carries the tie-break fix), delegating all P&L to
+`strategy.simulate_month` via its existing `entry_overrides` parameter --
+nothing here reimplements stops/targets/exits.
+
+## Results -- 13 canonical cycles, Mar-2025 to Mar-2026
+
+| | |
+|---|---|
+| Idealized (same-day-open) additive sum | +40.11% |
+| Real 3-stage additive sum | **+39.20%** |
+| Delta | **-0.91pt** over 13 months |
+| Months real beat idealized / worse | 6 / 7 |
+| Fill-day distribution | 48.5% day 1, 50.8% day 2, 0.8% day 3, 0% aborted |
+
+Extending to all 17 cycles run so far (adding Apr-Jul 2026): idealized
++40.50%, real +40.16%, delta **-0.34pt**, 8 better / 9 worse. The gap is
+real but small and two-sided -- this is Perold's (1988) implementation
+shortfall, not a strategy defect: a name that misses its Day-1 limit
+sometimes fills lower on Day 2 (helps) and sometimes higher (hurts), and
+across 13-17 cycles the two roughly wash with a slight net cost.
+
+**The reverted over-correction, quantified**: also capping the Day-1
+limit's upper bound at `close` (not just `entry_hi`) was tried and
+measured before being reverted -- it cost -2.6pt over the same 13 cycles
+and dropped the Day-1 fill rate from 61% to 37%, because `entry_hi` is a
+legitimate two-sided volatility-band estimate, not an arbitrary ceiling;
+capping it just forced more names into the noisier Day-2 re-quote for no
+benefit. Kept only the tie-break fix.
+
+## The `cycle_state.py` / `book.json` disconnection (the real bug)
+
+Separately, and more significantly: `cycle_state.py` (the daily P&L
+tracker) and `daily_report.build()` (used to reconstruct the outgoing
+month for SELL/HOLD/BUY classification) both independently assumed every
+position entered at "the open of the first session after expiry" --
+zero references to `book.py`/`entry_tracking.py` anywhere in
+`cycle_state.py`, despite those modules already tracking the REAL fill
+price/day via the 3-stage mechanism above. This affected every live
+daily update and monthly performance number ever sent, not just
+backtests. Fixed by making `book.json` the single source of truth
+(seeded with all 10 basket names as blank/pending on expiry evening,
+archived rather than deleted on close) and wiring both `cycle_state.py`
+and `daily_report.build()` to read real entry price / risk_anchor from
+it via `strategy.simulate_month`'s existing `entry_overrides` parameter
+-- no new parallel mechanism. `config.ACTUAL_FILLS_FILE`, an earlier,
+never-wired attempt at solving this same problem, was deleted.
+
+## Live entry-sheet sizing simplified -- and now diverges from section 15
+
+`daily_report.build_entry_sheet` (the live monthly order-sheet
+generator) had the coverage-scale `k` inflation described in section 15
+removed entirely, on explicit instruction: an existing investor's
+CONTINUE TO HOLD line now shows only the plain natural minimum share
+count (`_solve_shares_to_slot`'s own `n`, no basket-wide inflation), with
+a "scale up as needed" disclaimer, instead of inflating the whole
+basket's slot to cover whichever held position is most oversized. This
+was necessary because the coverage-scale design could distort an
+unrelated stock's fit -- e.g. one reconstructed high-share-count holding
+pushed POWERINDIA from a correct 1 share to an incorrect 2.
+
+**This means section 15's carry-forward backtest
+(`research/carry_forward_v5.py`, still coverage-scale-k-based, untouched
+tonight) and the live order sheet now use two different sizing
+mechanisms.** The section 15 historical NAV numbers (Rs 1,99,862.66 etc.)
+validate the coverage-scale design, not tonight's simplified one -- they
+should not be read as validating the current live sizing until
+`carry_forward_v5.py` is re-run against it, which has not been done.
+
+## Dead code removed
+
+11 one-off root-level `fill_check*.py` debugging scripts (11-12-Aug-2026,
+predating the 3-stage mechanism being finalized, zero cross-references
+from any production or research code) and their `fill_results*.jsonl`
+outputs, `research/fill_realism_v5.py` and `data/fill_realism_v5.jsonl`
+(superseded by `fill_realism_v6_3stage.py`/`.jsonl` above),
+`data/fill_realism_v5_3stage_backup.jsonl` (its cross-check value is now
+captured in the results table above), and `data/carry_forward_v6.json` /
+`carry_forward_v6_new.json` (orphaned -- no generating script exists in
+the repo anymore). All confirmed zero-reader via repo-wide grep before
+deletion, not assumed -- an earlier claim this same night that
+`daily_report.build()` was dead code turned out to be false, so this
+list was checked, not guessed. Full test suite (59 tests) green after
+deletion. `legacy/` (superseded pre-V4 pipeline, already self-documented
+as safe to delete) and `research/carry_forward_v5.py`,
+`research/book_backfill*.py` (active, referenced above and in
+CONTEXT.md) were left untouched.
+
+## `book.json` given the full real Day-1/2/3 fill history for the still-open 28-Jul-2026 cycle
+
+The 4 held names' book records (see item 6 earlier tonight) were
+approximated from the expiry-day close, not the real 3-stage mechanism;
+the other 6 names had no book record at all. `book.open_position()` now
+takes an optional `fill_history` dict, and `entry_tracking.py`'s
+`advance()` builds one -- day-by-day proposed price and filled/not --
+as it walks the real chain, live, going forward for every future cycle.
+
+For the already-past 28-Jul cycle, `research/
+book_backfill_jul28_fillhistory.py` replays the REAL production
+functions (`entry_tracking.open_window()` then `advance()` once per real
+trading day: 29/30/31-Jul-2026) against the actual cached bhavcopy, not
+a reimplementation. Result, transplanted into `data/book.json`:
+
+| Symbol | Day 1 quote | Filled? | Day 2 quote | Filled? | Real entry | Old (stale) cycle_state entry |
+|---|---|---|---|---|---|---|
+| TRENT, BANDHANBNK, GVT&D, POWERINDIA | market open | yes (Day 1) | -- | -- | = Day-1 open | already matched, unchanged |
+| KAYNES | 3314.93 | yes | -- | -- | 3271.00 | already matched, unchanged |
+| AMBER | 7406.06 | yes | -- | -- | 7256.00 | already matched, unchanged |
+| ADANIGREEN | 1367.44 | yes | -- | -- | **1367.44** | 1383.10 |
+| FORCEMOT | 16738.67 | **no** | 17525.18 | yes | **17327.00** | 17375.00 |
+| SAIL | 165.30 | **no** | 176.11 | yes | **170.70** | 165.86 |
+| IDEA | 12.94 | **no** | 13.17 | yes | **13.05** | 13.02 |
+
+FORCEMOT, SAIL and IDEA actually missed their Day-1 limit and filled on
+Day 2 -- `cycle_state.json` had assumed everyone filled at Day-1's open,
+the same idealized assumption item 6 above already found and fixed
+mechanically; this is that same bug's data, made concrete for real
+positions.  `data/cycle_state.json`'s stored `entry` field for these 4
+names was corrected to match (stop/target were untouched -- both are
+already correctly anchor-based off Day-1's open, which is unaffected by
+which day the fill happened).
+
+**ADANIGREEN is the one that matters most: it already exited on
+18-Aug-2026, reported to investors as a -5.00% stop-out (computed off
+the assumed 1383.10 entry). Its real entry was 1367.44, so the real
+exit is -3.91%, not -5.00%.** That number has already gone out. Whether
+to communicate a retroactive correction is a decision for a human, not
+silently reflected in a future note -- flagged here, not resolved.
+
+## Risk anchor further refined: same-day fills anchor to their own fill price, not Day-1's open (26-Aug-2026)
+
+Working through ADANIGREEN's numbers above surfaced a second, more
+fundamental bug in the anchor rule itself, not just its entry price.
+`entry_tracking.py` anchored stop/target to Day-1's actual open for
+EVERY fill, no matter which day or price it actually filled at. That
+rule exists (section 11, "the risk-anchor fix") to stop a DELAYED
+Day-2/3 fill from dragging the stop toward a market that moved while
+waiting -- real evidence, PNBHOUSING and BSE, both delayed fills. It was
+never evidenced for a Day-1 fill, and applying it there anyway broke the
+one promise the message makes: "SL: -5%" was silently 5% off a price
+never paid whenever a Day-1 limit filled below the open -- exactly what
+a limit order under the open is FOR.
+
+ADANIGREEN quoted/filled 1367.44 against a 1383.10 Day-1 open. Anchored
+to the open, stop = 1313.945, -3.91% off the real entry, not -5%, and it
+triggered on 18-Aug (low 1308.00). Anchored to the actual entry (correct
+now): stop = 1299.068 (rounds to 1299.07), a genuine -5%, which
+1308.00 does not breach -- the real trigger is 19-Aug, low 1281.10, a
+clean stop with no gap (open 1312.90 > stop), same -5.00% loss, one
+session later than what was recorded.
+
+## `build_entry_sheet` rewired to read book.json directly instead of re-deriving the outgoing month (26-Aug-2026)
+
+The root cause of the KALYANKJIL/ADANIGREEN mixup two sections up: `build_
+entry_sheet` asked `daily_report.build()` to answer "what's currently
+held" by re-running selection/ranking against today's data for the
+outgoing month -- which answers "what would the algorithm pick if run
+again today", not "what was actually held". ASM surveillance is only
+ever a current snapshot, so the redo silently un-vetoes a name dropped
+a month ago and silently drops a name that was real but has since
+changed status. Structural fix, not a patch: `book.holdings_for_expiry()`
+(new, merges live book.json + archive by `origin_expiry`) is now the
+sole source for "what's currently held" -- no re-derivation, no ASM
+dependency, because book.json already has the real answer recorded the
+moment it happened. `daily_report.build()` -- the function this
+replaces as build_entry_sheet's only caller -- is now dead code,
+confirmed by repo-wide grep, not removed yet.
+
+One side effect worth noting, not a new bug: a position already closed
+mid-cycle (exit_price set, whether by a real stop/target or because it
+was manually archived as part of tonight's catch-up) is deliberately
+excluded from the sheet's actionable "SELL — market on open" list --
+there's nothing left to sell, and the investor already heard about it
+the day it happened. Re-running the sheet against tonight's now-fully-
+archived book.json therefore shows an empty sells section for the 6
+names closed earlier this session; against the REAL, not-yet-caught-up
+state (5 of them still live) it correctly lists all 5 as actionable
+SELL orders, verified before and after this fix.
+
+Fixed in `entry_tracking.advance()`, in two passes the same evening.
+First pass re-anchored to the actual fill price. Second, cleaner pass
+(explicit instruction: "whatever the min basket price was, stop loss
+applies to that") -- anchor to the QUOTED min-basket price for whichever
+stage actually fills (Day 1's band limit, Day 2's Parkinson re-quote,
+Day 3's pooled-vol indicative estimate), not the fill/execution price.
+One number now governs both share count AND risk band at every stage;
+the two anchors only diverge from each other when a fill gaps through
+its own quote (open below a Day-1/2 limit, or Day 3's actual open vs.
+its indicative estimate) -- ADANIGREEN filled exactly at its Day-1
+quote with no gap, so both passes land on the identical number. The
+Day-1-open-anchored gap-abort check ahead of Day 2/3 is unchanged and
+deliberately so -- "has this already broken the level we accepted when
+we first decided to enter this month" is a Day-1 question by
+definition, not a per-stage one. `book_archive.jsonl` and
+`cycle_state.json`'s ADANIGREEN record both corrected: anchor 1367.44,
+stop 1299.07, exit 1299.07 on 19-Aug (not 1313.94 on 18-Aug). Same
+-5.00% loss either way -- only the date and the absolute levels move.
+
+---
+
+# 17. Backtesting formalized: single archive with A/S tags, BACKTEST_VERSION,
+#     current version (BT1) fully pre-archived — no cycle needs re-simulating
+
+**26-Aug-2026.** Closed out the three explicit rules negotiated the same
+night ("BACKTEST MEANS THE FOLLOWING: 1) basket for the month is the min
+basket for new investors 2) simulation only for past months, stored once
+so it's never recalculated again 3) all results logged here 4) a new
+version only on a stock-picking/entry/exit change") plus the two
+corrections that followed (`book_archive.jsonl` stays ONE file with a
+kind tag, not two files; live investor reporting via `book.
+holdings_for_expiry` never reads a simulated row).
+
+**1. Archive structure.** `book_archive.jsonl` now carries `"kind":
+"actual"` or `"kind": "simulated"` on every record, same file, same
+schema otherwise. The 6 pre-existing real records (ADANIGREEN, KAYNES,
+FORCEMOT, SAIL, IDEA, AMBER) were retrofitted with `kind: "actual"` in
+place. `book.holdings_for_expiry` and `book.get_archived` — the only two
+readers used for anything investor-facing — now skip any row that is
+not `kind == "actual"` (a row with no `kind` at all, i.e. anything
+written before tonight, is still treated as actual). `book.
+write_simulated_record` and `book.simulated_records` are the write/read
+pair for the new kind. Verified: `holdings_for_expiry("2026-07-28")`
+still returns exactly the 10 real names, none of the 170 newly-written
+simulated rows leaked in.
+
+**2. Versioning.** `config.BACKTEST_VERSION = "BT1"` — a new, explicit
+identifier, deliberately NOT reusing "V4" (the live strategy's own name)
+or "v5"/"v6" (ad hoc research-script filename iterations), both of
+which already meant something else in this codebase and would have been
+confusing to overload. Bumps only on one of the three agreed axes:
+stock-picking algo, entry strategy, or exit strategy. Tonight's anchor-
+rule fix is an entry-strategy change, so archived data starts at BT1,
+not BT0. This file stays one continuous document, tagged per section
+(as above) — never renamed or split per version.
+
+**3. `research/fill_realism_v6_3stage.py` brought current + archived.**
+Its risk-anchor logic still read `anchor = opn1` uniformly for every
+fill — stale relative to both of tonight's earlier entry_tracking.py
+fixes. Re-pointed to the same rule: `abort_anchor` (Day-1's open) stays
+the gap-abort threshold throughout; the anchor actually RECORDED on a
+fill is the quoted price for whichever stage fills (`quote1`/`quote2`/
+`quote3`). Each symbol's `detail[]` now also carries a full `fill_history`
+dict (day1/day2/day3, proposed price + filled flag) identical in shape
+to what `book.json` stores for real fills — the "how was this derived"
+trail that has to survive without ever re-simulating.
+
+Added `archive_month(y, m)`, which runs the (now-corrected) simulation
+once and writes one `kind="simulated"` record per filled symbol via
+`book.write_simulated_record` — entry price/date, risk_anchor, the full
+fill_history, and exit price/date/reason (read from `res_v6.exits` for
+a real STOP/TARGET, or from the month-end open on `roll` for the
+carry_forward=False force-close otherwise). Idempotent: a (symbol,
+origin_expiry) pair already archived under the current
+`BACKTEST_VERSION` is skipped, so re-running never duplicates a line.
+
+Ran `--archive-all` across all 17 cycles studied this session (2025-03
+through 2026-07 — the canonical 13-month comparison set plus the 4 live
+months since; 2026-08 excluded because it has not concluded, per rule
+4). Result: **170 simulated records** (17 cycles × 10 slots), every one
+with a non-null `exit_price`, all tagged `backtest_version: "BT1"`.
+2026-07's simulated basket differs from that cycle's real (`actual`)
+archive by one name (KALYANKJIL vs. ADANIGREEN) — expected and already
+documented in `harness.v4_basket`'s own docstring: NSE's ASM feed has no
+historical archive, so a backtest basket can never apply the same
+surveillance veto a live basket did that month. Not a new finding,
+confirmed still true under the fixed anchor logic.
+
+**Net effect:** any future backtest against BT1 for one of these 17
+cycles reads straight from `book.simulated_records(backtest_version=
+"BT1")` — no bhavcopy load, no classifier call, no re-derivation. A
+genuinely new idea (different stop/target rule, different sizing, etc.)
+still runs fresh through `research/harness.py` as before; only a
+same-version re-ask of "what did this cycle actually do" is now free.
+
+---
+
+# 18. BT1's 13-month total is +33.21%, not +39.20/+39.57% — the anchor
+#     fix's real, expected cost, confirmed against the archive
+
+**26-Aug-2026.** Read the freshly-archived BT1 numbers back against the
+canonical figures at the top of this file (§0: +39.57% idealized,
++39.20% "real 3-stage" at line 1244) and they do NOT match — a genuine
+~6pp gap over the same 13 cycles (2025-03 through 2026-03), not a
+transcription error.
+
+Ruled out a bug first: re-ran `research/fill_realism_v6_3stage.py 2025
+3` standalone and its own `v6_return_pct` (6.089) matches the archived
+records' derived mean (+6.09%) exactly, so the archive write path is
+faithful to what `strategy.simulate_month` actually computed. The
+fill-day distribution across the 13-cycle archive is 48.5% day-1 /
+50.8% day-2 / 0.8% day-3 / 0% aborted — identical to the old "-0.91pt"
+research figure at line 1247, so Day-1 sizing / which day a name fills
+on did NOT change.
+
+What did change: the risk anchor itself. Of the 67 Day-2/Day-3 fills in
+this window, 39 (58%) now hit STOP — because a delayed fill's anchor is
+now the QUOTED price for that stage (tonight's fix), which for a name
+that missed Day-1 is usually a re-quote ABOVE Day-1's open (the stock
+moved away, which is why it missed). Anchoring the stop to that higher
+number pulls the stop level up much closer to the actual entry than
+the old "always Day-1's open" rule did, so a normal pullback now
+triggers a stop that the old, looser anchor would have absorbed.
+Sample: KEI (Mar-25) -7.95%, TRENT (Jun-25) -6.20%, several exact -5.00%
+prints on the 5% regime-stop cycles — this is the "5% of entry price"
+behaviour explicitly asked for two fixes ago, now visible in aggregate.
+
+**This is not a regression to fix — it is the backtested price of the
+correction.** The old +39.20/+39.57% totals were generated under a
+looser (arguably wrong, per this session's own review) anchor rule that
+let late fills run with a stop pinned to a stale, lower reference
+price. BT1's +33.21% is the honest number under the anchor rule the
+strategy is now actually running live. The two figures are not
+interchangeable and should not both be quoted as "the V4 backtest" —
+BT1 supersedes them for any future risk/reward discussion, and this
+section is the record of why they moved.
+
+Separately, and unrelated to the anchor fix: BT1's Jul-2026 backtest
+return (+2.79%, §17) is NOT the same thing as that cycle's real
+investor outcome (~+5.3%, recomputed 26-Aug-2026 from the 6 `kind:
+"actual"` archive rows plus the 4 still-continuing book.json positions
+marked to 25-Aug close) — the backtest basket has no ASM veto and holds
+KALYANKJIL where the real basket held ADANIGREEN instead, and the two
+names' outcomes differed enough to move the month's average by ~2.5pp.
+Backtest and real-money outcomes for the same calendar cycle will keep
+diverging by exactly this mechanism for as long as NSE gives no
+historical ASM archive to backtest against (documented since
+`research/harness.py`'s `v4_basket`).
+
+---
+
+# 19. Complete BT1 backtest, 17 cycles — actual where it exists, simulated
+#     only where it doesn't
+
+**26-Aug-2026.** The 10 simulated Jul-28 rows from §17 were deleted —
+real `kind: "actual"` data already covers that month in full, so a
+simulated shadow of it was pure noise (this is what caused the 2.79%
+vs. 5.3% confusion two messages back). `archive_month` now hard-skips
+any expiry `book.holdings_for_expiry` already has actual coverage for,
+so this can't recur. The table below is the corrected, complete
+picture: 16 months read from `book.simulated_records(backtest_version=
+"BT1")`, one month (Jul-2026) read from the real archive plus the 4
+still-open book.json positions marked to 25-Aug close.
+
+| Cycle | Return | Source |
+|---|---|---|
+| 2025-03-27 | +6.09% | BT1 sim |
+| 2025-04-24 | −4.53% | BT1 sim |
+| 2025-05-29 | +1.75% | BT1 sim |
+| 2025-06-26 | −1.99% | BT1 sim |
+| 2025-07-31 | −3.22% | BT1 sim |
+| 2025-08-28 | +4.99% | BT1 sim |
+| 2025-09-30 | +0.99% | BT1 sim |
+| 2025-10-28 | +0.67% | BT1 sim |
+| 2025-11-25 | +2.37% | BT1 sim |
+| 2025-12-30 | −2.64% | BT1 sim |
+| 2026-01-27 | +11.97% | BT1 sim |
+| 2026-02-24 | −5.30% | BT1 sim |
+| 2026-03-30 | +22.08% | BT1 sim |
+| 2026-04-28 | +0.53% | BT1 sim |
+| 2026-05-26 | −2.45% | BT1 sim |
+| 2026-06-30 | −1.90% | BT1 sim |
+| 2026-07-28 | +5.31% | actual |
+
+**sum +34.71% · mean 2.04%/mo · sd 6.80 · best +22.08% · worst −5.30% ·
+positive 10/17.**
+
+This supersedes §17's table (which double-counted nothing, but included
+the now-deleted redundant Jul-28 sim row) and the pre-anchor-fix
++39.20%/+39.57% figures at §0/§16 for any live risk/reward discussion
+— see §18 for why those don't match.
+
+**This table itself was WRONG and has been superseded again — see §20.**
+It was generated before a real archive-derivation bug was caught: don't
+trust a backtest table without independently re-running at least one
+month fresh and diffing it against the archive, which is exactly what
+exposed this one.
+
+---
+
+# 20. §19's table was wrong — re-verified, corrected, and confirmed
+#     deterministic this time
+
+**26-Aug-2026, in response to being asked "are we 100% sure."** Not
+sugar-coating it: no, §19 was not right, and the honest way to find that
+out was to re-run several archived months FRESH and diff them against
+what got written, rather than re-asserting the same numbers with more
+confidence. That diff immediately failed on 2025-04-24: archived
+-4.53%, fresh re-run +3.37%. Two real bugs were under that, found in
+sequence, and BOTH are now fixed and independently verified — not just
+patched and re-asserted.
+
+**Bug 1 (real, but not the actual cause of the -4.53/+3.37 gap):**
+`res_baseline`/`res_v6` inside `fill_realism_v6_3stage.py` never passed
+`use_classifier`, so both defaulted through `config.
+CORP_ACTION_GREY_ZONE_ENABLED=True` into the live, network/LLM-backed
+corporate-action classifier — which this offline sandbox cannot reach
+deterministically. Fixed: `use_classifier=False` on the archived
+`simulate_month` call, and `config.CORP_ACTION_LLM_ENABLED = False` set
+at module scope in the backtest script only (config.py's persisted
+value, which the live report reads, is untouched). This is a correct,
+worthwhile fix — strategy.py's own docstring says backtests must be
+deterministic and offline — but re-running after this fix STILL gave a
+different number for 2025-04-24 (-4.53% vs +2.81%), proving it wasn't
+the real cause of that specific gap.
+
+**Bug 2 (the actual cause).** `strategy.simulate_month` calls
+`adjust_holding_window` INTERNALLY and walks its own corp-action-
+adjusted copy of the price series for every stop/target/pnl decision —
+that adjusted copy is what `v6_return_pct` reflects. It does not mutate
+or hand back the caller's own price dict, which stays raw. The
+archiving script's ROLLOVER-exit fallback read the exit price straight
+from that raw, caller-side dict — so BSE's real 23-May-2025 2:1 split
+showed as an unadjusted close of 2472.50 (a fake -60.48% "loss" against
+its 6257.07 entry) while `simulate_month`'s own internal walk correctly
+saw ~7066.52 (factor 2.858, real result closer to +13%). Fixed: the
+script now independently calls `strategy.adjust_holding_window` with
+the exact same arguments `simulate_month` uses internally, and reads
+the ROLLOVER exit price off that adjusted series instead of raw
+bhavcopy.
+
+**Verification, not re-assertion.** Wiped all 160 (later 130, after the
+first partial fix) simulated rows twice and rebuilt from scratch each
+time. After the real fix, wrote `research/_verify_bt1.py`: re-runs
+every one of the 16 simulated months completely fresh and checks three
+things against the archive independently — (1) `v6_return_pct` (the
+number `simulate_month` itself produces) matches the archive-derived
+mean to within rounding, (2) `n_aborted == 0` for every month (so
+"mean of 10" and "mean of the archived rows" are the same divisor —
+an aborted slot would silently shrink the archive without simulate_
+month's own convention changing), (3) every archived `risk_anchor`
+matches the exact stage-quote it should (quote1/quote2/quote3, per the
+25/26-Aug anchor fix). Result: **17 months checked (16 sim, one repeat
+across batches), 0 mismatches.** `python3 -m pytest tests/` still 59/59.
+
+**Corrected, verified 17-cycle table** (replaces §19's table in full):
+
+| Cycle | Return | Source |
+|---|---|---|
+| 2025-03-27 | +6.09% | BT1 sim |
+| 2025-04-24 | +2.81% | BT1 sim |
+| 2025-05-29 | +1.75% | BT1 sim |
+| 2025-06-26 | −1.99% | BT1 sim |
+| 2025-07-31 | −3.78% | BT1 sim |
+| 2025-08-28 | +4.68% | BT1 sim |
+| 2025-09-30 | +3.46% | BT1 sim |
+| 2025-10-28 | +0.67% | BT1 sim |
+| 2025-11-25 | +2.37% | BT1 sim |
+| 2025-12-30 | −2.64% | BT1 sim |
+| 2026-01-27 | +11.97% | BT1 sim |
+| 2026-02-24 | −5.30% | BT1 sim |
+| 2026-03-30 | +22.08% | BT1 sim |
+| 2026-04-28 | +0.53% | BT1 sim |
+| 2026-05-26 | −2.45% | BT1 sim |
+| 2026-06-30 | −1.57% | BT1 sim |
+| 2026-07-28 | +5.31% | actual |
+
+**sum +44.00% · mean 2.59%/mo · sd 6.59 · best +22.08% · worst −5.30% ·
+positive 11/17.**
+
+Only three months changed from §19 (2025-04, 2025-07, 2025-09, 2026-06
+— wherever an unadjusted corporate action happened to land on the
+rollover date); the rest were already correct because no split fell on
+those specific exit dates. That is exactly why a spot-check on one or
+two "reasonable-looking" months would not have caught this — the bug
+only fires when a real corporate action lands on a ROLLOVER exit day,
+which is a minority of rows, and every other row looks completely
+normal. `research/_verify_bt1.py` is kept as a permanent regression
+check: re-run it after any future change to `fill_realism_v6_3stage.py`
+or to `strategy.adjust_holding_window`/`simulate_month`, before trusting
+a new archive.

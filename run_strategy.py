@@ -133,7 +133,13 @@ def cmd_basket(args):
               "that file and set each pending position's 'entry' to the actual "
               "fill price -- this tool does not talk to your broker.")
     else:
-        print(f"\nStop {config.V4_STOP_LOSS_PCT}% / target {config.V4_TARGET_PCT}% "
+        # 25-Aug-2026 fix: was printing/persisting the flat
+        # config.V4_STOP_LOSS_PCT unconditionally, even though the
+        # basket's real stop (shown in the table above, in "stop_loss")
+        # comes from decision.stop_pct -- the regime-pegged value when
+        # config.REGIME_STOP_ENABLED. With that flag on, this printed
+        # "5%" next to a basket actually priced at 10%.
+        print(f"\nStop {decision.stop_pct}% / target {config.V4_TARGET_PCT}% "
               f"as resting orders. Re-entry policy: {config.V4_REENTRY_POLICY}.")
         print("Cross-month carry-forward is OFF: sell everything at the open "
               "after the next expiry, rebuy fresh next month.")
@@ -143,7 +149,7 @@ def cmd_basket(args):
     with open(out, "w") as fh:
         json.dump({"expiry": str(expiry),
                    "weights": config.V4_WEIGHTS,
-                   "stop_pct": config.V4_STOP_LOSS_PCT,
+                   "stop_pct": decision.stop_pct,
                    "target_pct": config.V4_TARGET_PCT,
                    "reentry": config.V4_REENTRY_POLICY,
                    "carry_forward": config.V4_CARRY_FORWARD,
@@ -210,10 +216,14 @@ def _is_trading_day(day: date) -> bool:
 def cmd_perf(args):
     """Portfolio performance note. Run on expiry evening, after `sheet`."""
     import alerts
+    import book
     import daily_report
-    import ledger
 
-    text = daily_report.render_performance(ledger.performance())
+    # 26-Aug-2026: book.performance() computes live from book_archive.jsonl
+    # every call -- ledger.performance() read a frozen daily snapshot that
+    # never picked up later corrections to the archive. See book.py's
+    # performance() docstring.
+    text = daily_report.render_performance(book.performance())
     print(text)
     if args.no_send:
         print("\n(--no-send: not delivered)")
@@ -303,7 +313,13 @@ def cmd_sheet(args):
     # reported instead of vanishing.
     try:
         import ledger
-        perf_data = ledger.performance()
+        import book
+        # 26-Aug-2026: book.performance() computes live from
+        # book_archive.jsonl every call -- see its docstring. ledger is
+        # still imported/used below for record_note(), which WRITES the
+        # audit trail (what was actually sent, when) -- that stays;
+        # nothing here reads ledger for the number any more.
+        perf_data = book.performance()
         perf_text = daily_report.render_performance(perf_data)
 
         # Open the multi-day entry-tracking window over the FULL basket (every
@@ -374,7 +390,11 @@ def cmd_sheet(args):
         # once real.)
         import book
         for s in (sheet.get("sells") or []):
-            book.close_position(s["symbol"])
+            # exit_price here is indicative (signal-day close) -- the real
+            # SELL executes at tomorrow's market open, not yet known
+            # tonight. Still strictly better archived than not at all.
+            book.close_position(s["symbol"], exit_price=s.get("last"),
+                                exit_date=expiry, reason="rollover (dropped from basket)")
         for sym, d in (sheet.get("rebalance") or {}).items():
             if d.get("status") == "rebalance":
                 book.adjust_shares(sym, d["new_shares"], expiry)
@@ -442,12 +462,24 @@ def cmd_daily(args):
     import entry_tracking
     et_state = entry_tracking.load()
     if et_state is not None and entry_tracking.is_window_active(et_state):
-        et_state = entry_tracking.advance(et_state, as_of)
-        et_text = entry_tracking.render(et_state)
-        print(et_text)
-        entry_tracking.record(et_state, et_text)
-        if et_state["resolved_as_of"] is not None:
-            entry_tracking.mark_final_sent(et_state)
+        # 25-Aug-2026 fix: this whole branch (Days 1-3 after every
+        # expiry, while fills are actually being tracked) sat outside any
+        # try/except -- the exact same blind spot that caused the %-d
+        # crash: an uncaught exception here dies silently, no log past
+        # whatever printed last, no failure alert, on exactly the days
+        # real orders are being placed.
+        try:
+            et_state = entry_tracking.advance(et_state, as_of)
+            et_text = entry_tracking.render(et_state)
+            print(et_text)
+            entry_tracking.record(et_state, et_text)
+            if et_state["resolved_as_of"] is not None:
+                entry_tracking.mark_final_sent(et_state)
+        except Exception as exc:
+            logging.getLogger("momentum_tracker").exception(
+                "Entry-tracking advance failed for %s", as_of)
+            alerts.send_failure(f"entry-tracking advance for {as_of}", exc)
+            raise
         if args.no_send:
             print("\n(--no-send: not delivered)")
             return
@@ -489,7 +521,8 @@ def cmd_daily(args):
     import book
     for e in report.exits:
         if e.exit_date == as_of:
-            book.close_position(e.symbol)
+            book.close_position(e.symbol, exit_price=e.exit_px,
+                                exit_date=e.exit_date, reason=e.reason)
 
     if args.no_send:
         print("\n(--no-send: not delivered)")

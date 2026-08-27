@@ -1,5 +1,14 @@
 # CONTEXT.md — Momentum Tracker
 
+## Working Rule — no hand-fixes to data files (added 27-Aug-2026)
+
+Never hand-edit a live data file (`book.json`, `entry_tracking.json`, `cycle_state.json`, or any other state file) to fix a bug or correct a bad value. Before touching any of them:
+
+1. **Exhaust programmatic options first.** Find or write a function that derives the correct value from real source data (the actual bhavcopy, the actual formula the live code uses) and apply it in code, then verify the result against an independent check (e.g. `entry_tracking.reconcile()`, a fresh call to the same function the live pipeline calls). Typing a number in — even a correctly-computed one — belongs in a script that derives and writes it, never in a manual JSON edit.
+2. **Check with the user explicitly before applying any fix to live data**, even a programmatic one. Describe what's wrong, what the fix will change, and how it was derived, and wait for a go-ahead before writing.
+
+Why this is a rule and not a suggestion: the 26-Aug KPITTECH/NATIONALUM frozen-quote incident was caused by a stale value nobody re-checked against current code. The fix for it (`reconcile()`/`apply_reconcile_fixes()`) was built specifically to close that gap — recompute fresh, diff against frozen, apply the diff's own output with no manual retyping. But the very first live use of that fix was itself applied by hand-editing `quote_price`/`shares`/`sl_price`/`exit_price` on `entry_tracking.json` directly, and `risk_anchor`/`sigma1` were never touched because nothing forced a review of the FULL record — only the fields that seemed relevant at the time. That gap sat dormant for a day and crashed the 27-Aug evening production run outright. Two hand-fixes, two different fields silently missed, same root cause both times: fixing a symptom by editing JSON instead of running code that derives the whole state.
+
 ## Architecture Overview
 
 Single-user, local-only Python app. No cloud services, no database.
@@ -1463,6 +1472,22 @@ Two follow-up questions, neither required a fix:
 Why did KPITTECH's share count go from 54 (Day-1 limit, missed) to 55 (Day-2 re-quote) when the price also went UP (579.79 → 594.43)? Checked against the actual numbers: 54 × 579.79 = Rs 31,309 (-3.6% off the Rs 32,479 slot target this basket sizes every name to); 55 × 594.43 = Rs 32,694 (+0.66% off the same target). The allocation moved CLOSER to equal-weight, not further — well inside `ENTRY_MAX_WEIGHT_DEV_PCT` (10%). Mechanically the two quotes aren't even produced by the same formula: Day-1's price/share pair is solved jointly against the volatility band (`_solve_shares_to_slot` searches n-1/n/n+1); Day-2's price comes first, independently, off Day-1's realized volatility (`_vol_requote`), and shares are only derived after as `round(slot_target / price)`. The 54→55 jump is whole-share rounding around a fixed rupee target, not the strategy rewarding a price rise with a bigger position.
 
 Separately: quoted prices (594.43, 32,479/n, etc.) aren't valid NSE tick multiples — real limit/SL orders must land on the exchange's price-band tick size (₹0.01 below ₹250, ₹0.05 up to ₹1,000, ₹0.10 up to ₹5,000, ₹0.50 up to ₹10,000, ₹1.00 up to ₹20,000, ₹5.00 above — last revised 15-Apr-2025). A `_round_to_tick()` helper was designed (price-band lookup, `round(round(price/tick)*tick, 2)`) but explicitly NOT wired in — decided to leave tick-rounding to the investor when they place the order, since the deviation is at most a few paise and not worth adding another rounding layer to live sizing code. No code changed as a result of this discussion.
+
+### `risk_anchor`/`sigma1` left `None` by an earlier hand-fix, crashed the real 27-Aug production run
+
+Tonight's 19:30 scheduled `cmd_daily` run crashed mid-way through Day-2 processing: `anchor_stop = anchor * (1 - stop_pct / 100.0)` in `advance()`'s `n == 2` branch, `TypeError: unsupported operand type(s) for *: 'NoneType' and 'float'`. `d["risk_anchor"]` was `None` for KPITTECH and NATIONALUM — residue from the 26-Aug incident fix a few nights earlier, where the phantom-FILLED revert restored `quote_price`/`shares`/`sl_price`/`exit_price` (the fields the pricing formula computes) but never touched `risk_anchor`/`sigma1` (facts about what Day-1 actually did, not part of the quote formula `reconcile()`/`apply_reconcile_fixes()` cover). Fixed by recomputing both from the real, already-cached Day-1 (26-Aug) bhavcopy — `_parkinson_sigma()` on the real H/L reproduced the exact 594.43/403.11 quotes already on file, confirming the derivation, not a guess. Also flagged and fixed a related silent-failure gap: the run's failure alert had nowhere to go because `TELEGRAM_ADMIN_CHAT_ID` was never set — added to `.env`.
+
+This is also the incident that produced the standing rule at the top of this file (`## Working Rule — no hand-fixes to data files`): two separate fields silently missed by one hand-edit, same root cause both times.
+
+### `--no-send` deleted the entry-tracking window before ever checking whether anything was sent
+
+Running `run_strategy.py daily --no-send` to preview tonight's message did far more than preview: `mark_final_sent()` ran unconditionally inside `cmd_daily`'s `try` block, *before* the `--no-send` check even executed, deleting `entry_tracking.json` and writing a ledger record as if the "Final fill list" message had gone out — although `--no-send` means it explicitly hadn't. The very next real run (no flag) found `is_window_active()` false, fell straight through to the normal Stream-2 daily note, and delivered *that* instead — silently skipping the actual investor-facing message that reports today's Day-2 fills (KALYANKJIL/KPITTECH/NATIONALUM/NAM-INDIA: entry price, qty, SL, exit). The regular note that did go out was numerically correct (fills are written to `book.json` inside `advance()` regardless of `--no-send`, which is intentional — fills are market fact, not something to gate on message delivery) but never told investors those four names had just filled or at what levels.
+
+Fixed by moving only `mark_final_sent()` to run after `alerts.send()` confirms success (`entry_tracking.record()` deliberately left where it was — `cmd_sheet` documents the same "record before sending, the decision is what matters" pattern elsewhere in this file, and gating record() too would have contradicted that existing, intentional design rather than fixed a bug). `mark_final_sent()`'s own docstring already says it should run "right after the final message has already been rendered and recorded" — the code just didn't honor its own documented order. Side effect: this also closes a second, previously-unnoticed bug where a genuine Telegram outage on a resolved window destroyed the state file before knowing whether delivery had actually failed, with no way to retry. The missed message itself was recovered by resending the literal text the `--no-send` run had already printed (a one-off script, deleted after use) — not recomputed or retyped.
+
+### `render()` numbering restored
+
+`render()`'s FILLED/LIMIT BUY/MANDATORY sections lost their numbering in the 26-Aug two-line-to-one-line rewrite (`render_new_investor_day0` still numbers its list; this one didn't). Restored, numbered separately within each section (1, 2, 3... per section, not one running count across all three) since each is a distinct checklist an investor works through.
 
 ## Pending Tasks
 

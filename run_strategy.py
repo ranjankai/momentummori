@@ -473,8 +473,6 @@ def cmd_daily(args):
             et_text = entry_tracking.render(et_state)
             print(et_text)
             entry_tracking.record(et_state, et_text)
-            if et_state["resolved_as_of"] is not None:
-                entry_tracking.mark_final_sent(et_state)
         except Exception as exc:
             logging.getLogger("momentum_tracker").exception(
                 "Entry-tracking advance failed for %s", as_of)
@@ -483,8 +481,20 @@ def cmd_daily(args):
         if args.no_send:
             print("\n(--no-send: not delivered)")
             return
+        # mark_final_sent() deletes entry_tracking.json -- it must only run
+        # once delivery is actually confirmed. Until 27-Aug-2026 this ran
+        # unconditionally above, before this --no-send check even executed:
+        # a preview run deleted the window's state and left the ledger
+        # showing a "sent" record for a message nobody received, so the
+        # very next real run found no active window and silently fell
+        # through to the normal daily note instead of the actual fill
+        # list. Same fix also closes a second, related bug: previously a
+        # genuine Telegram outage on a resolved window destroyed the state
+        # before knowing delivery had failed, with no way to retry.
         if alerts.send(et_text):
             print(f"\nDelivered to Telegram chat {config.TELEGRAM_CHAT_ID}")
+            if et_state["resolved_as_of"] is not None:
+                entry_tracking.mark_final_sent(et_state)
         else:
             print("\nDELIVERY FAILED -- see logs/app.log", file=sys.stderr)
             sys.exit(2)

@@ -923,10 +923,16 @@ def render(state: dict) -> str:
 
     # 26-Aug-2026: one line per stock instead of two -- explicit ask, the
     # two-line-per-stock layout read as a wall of text on Telegram.
+    # 27-Aug-2026: numbered within each section -- matches
+    # render_new_investor_day0's numbered list, dropped by accident when
+    # this was rewritten from two lines to one. Restarts at 1 per section
+    # (FILLED / LIMIT BUY / MANDATORY), not one running count across all
+    # three, since each is a distinct list an investor checks off
+    # separately.
     if filled:
         L.append("<b>FILLED</b>")
-        for sym, d in filled:
-            L.append(f"<b>{esc(sym)}</b>: {d['shares']:,} qty @ "
+        for i, (sym, d) in enumerate(filled, 1):
+            L.append(f"{i}. <b>{esc(sym)}</b>: {d['shares']:,} qty @ "
                      f"{daily_report._fmt_money(d['price'])}  (Day {d['filled_day']})  "
                      f"SL: {daily_report._fmt_money(d['sl_price'])}  "
                      f"Exit: {daily_report._fmt_money(d['exit_price'])}")
@@ -934,23 +940,23 @@ def render(state: dict) -> str:
 
     if pending_limit:
         L.append("<b>LIMIT BUY — TOMORROW (re-priced, Day-1 limit missed)</b>")
-        for sym, d in pending_limit:
+        for i, (sym, d) in enumerate(pending_limit, 1):
             sl_exit = ""
             if d.get("sl_price") is not None:
                 sl_exit = (f"  SL: {daily_report._fmt_money(d['sl_price'])}  "
                           f"Exit: {daily_report._fmt_money(d['exit_price'])}")
-            L.append(f"<b>{esc(sym)}</b>: {d['shares']:,} qty @ "
+            L.append(f"{i}. <b>{esc(sym)}</b>: {d['shares']:,} qty @ "
                      f"{daily_report._fmt_money(d['quote_price'])}{sl_exit}")
         L.append("")
 
     if pending_mandatory:
         L.append("<b>MANDATORY MARKET BUY — TOMORROW</b>")
-        for sym, d in pending_mandatory:
+        for i, (sym, d) in enumerate(pending_mandatory, 1):
             sl_exit = ""
             if d.get("sl_price") is not None:
                 sl_exit = (f"  SL: {daily_report._fmt_money(d['sl_price'])}  "
                           f"Exit: {daily_report._fmt_money(d['exit_price'])}")
-            L.append(f"<b>{esc(sym)}</b>: {d['shares']:,} qty @ "
+            L.append(f"{i}. <b>{esc(sym)}</b>: {d['shares']:,} qty @ "
                      f"~{daily_report._fmt_money(d['quote_price'])} (market buy){sl_exit}")
         L.append("")
 

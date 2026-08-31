@@ -268,6 +268,15 @@ def build(as_of: date, session=None) -> Report:
     # visible rather than quietly forgotten.
     today_frame = merged.get(as_of)
     for e in rpt.exits:
+        # 31-Aug-2026 fix: an exit that happened TODAY is already shown in
+        # full, with its own reason and price, under "Exits today" a few
+        # lines above this section in render() -- repeating it here under
+        # "Exited" too, on the very same day, was pure duplication (worse,
+        # confusingly worded: "exited at X% on <today>, today at Y%" reads
+        # as two different days when it's one). This section is for aging
+        # PAST exits, not re-announcing today's.
+        if e.exit_date == as_of:
+            continue
         now = None
         if today_frame is not None and e.symbol in today_frame.index:
             c = today_frame.at[e.symbol, "close_price"]
@@ -979,8 +988,8 @@ def render(rpt: Report) -> str:
     L = [f"<b>Momentum Tracker — {rpt.as_of:%d-%m-%y}</b>", ""]
 
     sign = "+" if rpt.mtd_return_pct >= 0 else ""
-    L.append(f"<b>Cycle performance: {sign}{rpt.mtd_return_pct:.2f}%</b>")
-    L.append(f"<i>since the {rpt.expiry:%d-%m-%y} expiry</i>")
+    L.append(f"<b>Cycle performance: {sign}{rpt.mtd_return_pct:.2f}% "
+             f"since {rpt.expiry:%d-%m-%Y}</b>")
     L.append("")
 
     today_exits = [e for e in rpt.exits

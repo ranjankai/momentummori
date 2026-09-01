@@ -330,45 +330,11 @@ def holdings_for_expiry(expiry, path: str = None) -> dict:
     return out
 
 
-def get_archived(symbol: str, path: str = None) -> dict:
-    """
-    Latest archived record for `symbol`, or None.
-
-    25-Aug-2026 addition: a position that exited mid-cycle (stop/target)
-    is archived and removed from the live book by close_position() --
-    correct for the LIVE book, but it means get(symbol) goes silently
-    blank the moment daily_report.build() needs to reconstruct an
-    OUTGOING month that included that exit (e.g. the expiry-evening
-    scorecard). Without this fallback, entry_overrides quietly drops the
-    real entry for anything that already closed, and the reconstruction
-    falls back to the idealized Day-1-open guess for exactly the kind of
-    position this file exists to get right. A symbol can appear more than
-    once across cycles (re-entered later); the LAST line wins, matching
-    how the live book always reflects the most recent state.
-
-    26-Aug-2026: skips kind=="simulated" rows for the same reason
-    holdings_for_expiry does -- this is a live-reporting fallback and
-    must never surface a backtest row as if it were a real fill.
-    """
-    path = os.path.join(os.path.dirname(path or BOOK_FILE),
-                        os.path.basename(ARCHIVE_FILE)) if path else ARCHIVE_FILE
-    if not os.path.exists(path):
-        return None
-    found = None
-    with open(path, encoding="utf-8") as fh:
-        for line in fh:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                rec = json.loads(line)
-            except ValueError:
-                continue
-            if rec.get("kind", "actual") != "actual":
-                continue
-            if rec.get("symbol") == symbol:
-                found = rec
-    return found
+# get_archived() removed 01-Sep-2026: dead code, zero callers anywhere --
+# it was a fallback built specifically for daily_report.build() (see that
+# function's own removal, same session), which is now gone. holdings_for_
+# expiry() above covers the same "what was actually held" need for
+# anything still live.
 
 
 def simulated_records(backtest_version: str = None, symbol: str = None,

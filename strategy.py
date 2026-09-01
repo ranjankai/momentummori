@@ -720,12 +720,6 @@ class Position:
         return (self.last - self.entry) / self.entry * 100
 
     @property
-    def pct_to_target(self) -> float:
-        if not self.last:
-            return 0.0
-        return (self.target - self.last) / self.last * 100
-
-    @property
     def target_placeable(self) -> bool:
         """
         True once a sell limit at `target` is inside the exchange's dynamic

@@ -497,10 +497,6 @@ LLM_TARGET_MAX_PCT = 40.0
 # put at equity risk for nothing.
 RISK_FREE_ANNUAL_PCT = 8.0
 
-# DEPLOY hurdle: if no candidate can plausibly gain this much over the
-# holding period, the slot stays in cash. Rounded up from 8/12 = 0.67.
-LLM_DEPLOY_MIN_PCT = 1.0
-
 # TARGET floor: a separate number. A target must be far enough above
 # entry to be worth placing at all -- a 1% target books out on the first
 # day's noise and turns a momentum strategy into a scalping one. This is
@@ -514,31 +510,15 @@ CASH_ACCRUES_RISK_FREE = True
 
 LLM_JUDGMENT_FILE = os.path.join(DATA_DIR, "llm_targets.json")
 
-# Mid-month replacement selection.
-#
-# The monthly composite (vol/rollover/carry) CANNOT be recomputed between
-# expiries: measured 02-Aug-2026 over the Jul-2026 cycle, rollover's rank
-# correlation with the previous snapshot sits at 0.84-0.95 for three
-# weeks -- frozen -- and its mid-cycle rank correlation with the expiry
-# value is -0.1. A mid-month reading is not a weak version of the signal,
-# it is unrelated to it.
-#
-# So mid-month candidate selection uses CASH DATA ONLY: price-based
-# relative strength, recomputed daily. Derivatives are not consulted.
-LLM_CANDIDATE_ENABLED = False
-
-# Mechanical price-based RS, used to build the shortlist the LLM chooses
-# from AND as the fallback when the LLM is off or fails. Weights sum to 1.
-RS_WEIGHTS = {
-    "ret_126d": 0.30,     # 6-month relative strength
-    "ret_63d": 0.30,      # 3-month
-    "above_dma50": 0.20,  # trend confirmation
-    "volatility": 0.20,   # keeps the volatility tilt that the backtest found
-}
-
-# (CANDIDATE_SHORTLIST_N removed 02-Aug-2026: pre-filtering the universe
-# by RS reimposed the single-score cutoff the LLM layer exists to avoid.
-# The model now sees every eligible name.)
+# (Mid-month LLM candidate-replacement selection -- LLM_CANDIDATE_ENABLED,
+# RS_WEIGHTS, rs_rank()/choose_candidate() in llm_judgment.py, and the
+# CANDIDATE_SHORTLIST_N removed 02-Aug-2026 before it -- removed
+# 01-Sep-2026. It was only ever called from daily_report.build(), deleted
+# the same session as confirmed dead code; nothing else in the live
+# pipeline, tests, or research scripts ever called it. Mid-cycle redeploy
+# itself has been off in production throughout (V4_REDEPLOY_ENABLED =
+# False), so this was already inert; the whole chain is just gone now
+# rather than orphaned. See CONTEXT.md's 01-Sep-2026 session.)
 
 
 # ---------------------------------------------------------------------------

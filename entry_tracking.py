@@ -155,8 +155,13 @@ def _vol_requote(close: float, sigma: float) -> float:
     bug was one function whose already-frozen OUTPUT went stale after a
     fix; a hand-duplicated formula here would be two IMPLEMENTATIONS that
     could disagree even on fresh input. One formula, one place.
+
+    01-Sep-2026: also tick-rounds via daily_report._round_to_tick -- same
+    reasoning as _solve_shares_to_slot's identical change the same day
+    (see that function's comment), applied here so Day-2/3 quotes get it
+    too, not just Day-1's.
     """
-    return round(close * math.exp(Z80 * sigma), 2)
+    return daily_report._round_to_tick(close * math.exp(Z80 * sigma))
 
 
 def load(path: str = None) -> dict:
@@ -386,13 +391,13 @@ def advance(state: dict, day: date, path: str = None) -> dict:
             # limit fill).
             d["risk_anchor"] = opn
             anchor_stop = opn * (1 - stop_pct / 100.0)
-            d["sl_price"] = round(anchor_stop, 2)
+            d["sl_price"] = daily_report._round_to_tick(anchor_stop)
             # This symbol's OWN target, not the window-level flat value --
             # see open_window's docstring (14-Aug-2026 fix). Old windows
             # saved before this fix have no per-stock "target_pct", so fall
             # back to the window's flat value for those.
             sym_target_pct = d.get("target_pct", state["target_pct"])
-            d["exit_price"] = round(opn * (1 + sym_target_pct / 100.0), 2)
+            d["exit_price"] = daily_report._round_to_tick(opn * (1 + sym_target_pct / 100.0))
 
             # Continuing (HOLD-tagged) name, new-investor market_buy path
             # (15-Aug-2026 addendum): no limit chase, no gap-risk-abort --
@@ -465,9 +470,9 @@ def advance(state: dict, day: date, path: str = None) -> dict:
                 # matches the fix above exactly for that real case.
                 d["risk_anchor"] = day1_quote
                 anchor_stop = day1_quote * (1 - stop_pct / 100.0)
-                d["sl_price"] = round(anchor_stop, 2)
+                d["sl_price"] = daily_report._round_to_tick(anchor_stop)
                 sym_target_pct = d.get("target_pct", state["target_pct"])
-                d["exit_price"] = round(day1_quote * (1 + sym_target_pct / 100.0), 2)
+                d["exit_price"] = daily_report._round_to_tick(day1_quote * (1 + sym_target_pct / 100.0))
                 hist["day1"] = {"date": str(day), "proposed_price": day1_quote,
                                 "filled": True, "fill_price": round(fill_price, 2)}
                 d.update(status="filled", filled_day=1, price=round(fill_price, 2))
@@ -491,7 +496,7 @@ def advance(state: dict, day: date, path: str = None) -> dict:
                 # standard 20-day band's upper edge as the re-quote price
                 # rather than blocking on one name.
                 lo, hi, _ = daily_report._compute_stock_entry_band(sym, {day: frame}, close or opn)
-                d["quote_price"] = round(hi, 2)
+                d["quote_price"] = daily_report._round_to_tick(hi)
             else:
                 d["quote_price"] = _vol_requote(close, sigma1)
             d["shares"] = max(1, round(slot_target / d["quote_price"]))
@@ -508,8 +513,8 @@ def advance(state: dict, day: date, path: str = None) -> dict:
             # branches already use; risk_anchor itself is untouched here,
             # it must stay the Day-1 open for the abort-check above.
             sym_target_pct = d.get("target_pct", state["target_pct"])
-            d["sl_price"] = round(d["quote_price"] * (1 - stop_pct / 100.0), 2)
-            d["exit_price"] = round(d["quote_price"] * (1 + sym_target_pct / 100.0), 2)
+            d["sl_price"] = daily_report._round_to_tick(d["quote_price"] * (1 - stop_pct / 100.0))
+            d["exit_price"] = daily_report._round_to_tick(d["quote_price"] * (1 + sym_target_pct / 100.0))
 
         elif n == 2:
             if opn <= 0:
@@ -531,9 +536,9 @@ def advance(state: dict, day: date, path: str = None) -> dict:
                 # the fill's own stage.
                 d["risk_anchor"] = day2_quote
                 anchor_stop_out = day2_quote * (1 - stop_pct / 100.0)
-                d["sl_price"] = round(anchor_stop_out, 2)
+                d["sl_price"] = daily_report._round_to_tick(anchor_stop_out)
                 sym_target_pct = d.get("target_pct", state["target_pct"])
-                d["exit_price"] = round(day2_quote * (1 + sym_target_pct / 100.0), 2)
+                d["exit_price"] = daily_report._round_to_tick(day2_quote * (1 + sym_target_pct / 100.0))
                 hist["day2"] = {"date": str(day), "proposed_price": day2_quote,
                                 "filled": True, "fill_price": round(fill_price, 2)}
                 d.update(status="filled", filled_day=2, price=round(fill_price, 2))
@@ -559,7 +564,7 @@ def advance(state: dict, day: date, path: str = None) -> dict:
             pooled_sigma = sum(sigmas) / len(sigmas) if sigmas else None
             if pooled_sigma is None or close <= 0:
                 lo, hi, _ = daily_report._compute_stock_entry_band(sym, {day: frame}, close or opn)
-                d["quote_price"] = round(hi, 2)
+                d["quote_price"] = daily_report._round_to_tick(hi)
             else:
                 d["quote_price"] = _vol_requote(close, pooled_sigma)
             d["shares"] = max(1, round(slot_target / d["quote_price"]))
@@ -568,8 +573,8 @@ def advance(state: dict, day: date, path: str = None) -> dict:
             # `anchor` (risk_anchor, Day-1's open) is untouched, still the
             # abort-check basis.
             sym_target_pct = d.get("target_pct", state["target_pct"])
-            d["sl_price"] = round(d["quote_price"] * (1 - stop_pct / 100.0), 2)
-            d["exit_price"] = round(d["quote_price"] * (1 + sym_target_pct / 100.0), 2)
+            d["sl_price"] = daily_report._round_to_tick(d["quote_price"] * (1 - stop_pct / 100.0))
+            d["exit_price"] = daily_report._round_to_tick(d["quote_price"] * (1 + sym_target_pct / 100.0))
 
         elif n == 3:
             anchor = d["risk_anchor"]
@@ -594,9 +599,9 @@ def advance(state: dict, day: date, path: str = None) -> dict:
             # is not known until the moment it fires, so the plan made the
             # evening before is the only number to be consistent with.
             anchor_stop_out = day3_quote * (1 - stop_pct / 100.0)
-            d["sl_price"] = round(anchor_stop_out, 2)
+            d["sl_price"] = daily_report._round_to_tick(anchor_stop_out)
             sym_target_pct = d.get("target_pct", state["target_pct"])
-            d["exit_price"] = round(day3_quote * (1 + sym_target_pct / 100.0), 2)
+            d["exit_price"] = daily_report._round_to_tick(day3_quote * (1 + sym_target_pct / 100.0))
             hist["day3"] = {"date": str(day), "proposed_price": day3_quote,
                             "filled": True, "fill_price": round(opn, 2)}
             d.update(status="filled", filled_day=3, price=round(opn, 2))
@@ -692,7 +697,7 @@ def reconcile(state: dict = None, path: str = None) -> list:
             if sigma1 is None or close <= 0:
                 opn = float(row.get("open_price", 0) or 0)
                 lo, hi, _ = daily_report._compute_stock_entry_band(sym, {day1: frame}, close or opn)
-                fresh_price = round(hi, 2)
+                fresh_price = daily_report._round_to_tick(hi)
             else:
                 fresh_price = _vol_requote(close, sigma1)
         else:
@@ -714,7 +719,7 @@ def reconcile(state: dict = None, path: str = None) -> list:
             if pooled is None or close <= 0:
                 opn2 = float(row2.get("open_price", 0) or 0)
                 lo, hi, _ = daily_report._compute_stock_entry_band(sym, {day2: frame2}, close or opn2)
-                fresh_price = round(hi, 2)
+                fresh_price = daily_report._round_to_tick(hi)
             else:
                 fresh_price = _vol_requote(close, pooled)
 
@@ -769,8 +774,8 @@ def apply_reconcile_fixes(mismatches: list, state: dict = None, path: str = None
         d["quote_price"] = new_quote
         d["shares"] = max(1, round(slot_target / new_quote))
         sym_target_pct = d.get("target_pct", state["target_pct"])
-        d["sl_price"] = round(new_quote * (1 - stop_pct / 100.0), 2)
-        d["exit_price"] = round(new_quote * (1 + sym_target_pct / 100.0), 2)
+        d["sl_price"] = daily_report._round_to_tick(new_quote * (1 - stop_pct / 100.0))
+        d["exit_price"] = daily_report._round_to_tick(new_quote * (1 + sym_target_pct / 100.0))
         logger.warning("reconcile: %s quote %.2f -> %.2f (shares %d, sl %.2f, exit %.2f)",
                        sym, old_quote, new_quote, d["shares"], d["sl_price"], d["exit_price"])
 

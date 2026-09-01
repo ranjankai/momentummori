@@ -197,6 +197,7 @@ def _apply_corporate_action(pos, close, day, use_classifier):
 
 def apply_session(state: dict, day: date, frame, use_classifier=None) -> dict:
     """Advance `state` by exactly one session. Mutates and returns it."""
+    import daily_report
     if use_classifier is None:
         use_classifier = bool(getattr(config, "CORP_ACTION_GREY_ZONE_ENABLED",
                                       False))
@@ -278,8 +279,16 @@ def apply_session(state: dict, day: date, frame, use_classifier=None) -> dict:
                 sym_target_pct = target_pct
             pos["entry"] = entry
             pos["entry_date"] = entry_date
-            pos["stop"] = anchor * (1 - sym_stop_pct)
-            pos["target"] = anchor * (1 + sym_target_pct)
+            # 01-Sep-2026: tick-rounded -- this is the actual live source
+            # of the SL/target shown in "CONTINUE TO HOLD" every evening
+            # (POWERINDIA's real SL of 31,706.25 came from here, not
+            # entry_tracking.py; that stock's tick above Rs 20,000 is
+            # Rs 5, so 31,706.25 was never a placeable order). Fixed once,
+            # here -- this value is set on entry day and never
+            # recomputed for the life of the hold, so there is only this
+            # one site to get right.
+            pos["stop"] = daily_report._round_to_tick(anchor * (1 - sym_stop_pct))
+            pos["target"] = daily_report._round_to_tick(anchor * (1 + sym_target_pct))
             pos["status"] = "HOLD"
             pos["last_close"] = c
             state["entry_date"] = state["entry_date"] or str(day)
@@ -405,6 +414,21 @@ def to_report(state: dict):
     # on an EXITED position is now refreshed daily in apply_session (same
     # fix), so "now" is real, not frozen on the exit date.
     for e in exits:
+        # 01-Sep-2026 fix: same duplication class as daily_report.build()'s
+        # copy of this loop (fixed 31-Aug-2026) -- except that fix landed
+        # in the WRONG function. to_report() here is what cmd_daily
+        # actually calls in production (see the "SELL ORDERS" comment
+        # just above, which documents this exact same
+        # fixed-the-dead-copy-not-the-live-one mistake happening once
+        # already, 17-Aug-2026); daily_report.build() is unused by the
+        # live pipeline. A same-day exit is already shown in full under
+        # "Exits today" (render()'s own filter, exit_date == rpt.as_of);
+        # repeating it here worded as "on <today>, today at Y%" when
+        # today IS the exit date was pure duplication -- confirmed live
+        # on the 01-Sep-2026 note (KALYANKJIL/NAM-INDIA both appeared in
+        # both sections).
+        if e.exit_date == rpt.as_of:
+            continue
         pos = state["positions"][e.symbol]
         now = pos.get("last_close")
         rpt.exited_review.append({
@@ -444,32 +468,6 @@ def build(as_of: date, session=None):
     return to_report(state)
 
 
-def summarise(state: dict) -> dict:
-    """Per-position returns and the equal-weight cycle return."""
-    slots = state.get("slots") or config.PORTFOLIO_SIZE
-    holds, exits, total = [], [], 0.0
-    for sym, pos in state["positions"].items():
-        entry = pos.get("entry")
-        if not entry:
-            continue
-        if pos["status"] == "EXITED":
-            pct = (pos["exit_px"] / entry - 1) * 100
-            exits.append({"symbol": sym, "entry": entry,
-                          "exit_px": pos["exit_px"], "reason": pos["reason"],
-                          "exit_date": pos["exit_date"], "pct": pct})
-        else:
-            last = pos.get("last_close") or entry
-            pct = (last / entry - 1) * 100
-            band = config.PRICE_BAND_PCT / 100.0
-            holds.append({"symbol": sym, "entry": entry, "last": last,
-                          "stop": pos["stop"], "target": pos["target"],
-                          "pct": pct, "stale": pos.get("stale", False),
-                          "target_placeable": pos["target"] <= last * (1 + band)})
-        total += pct
-    holds.sort(key=lambda r: -r["pct"])
-    exits.sort(key=lambda r: r["exit_date"])
-    return {"as_of": state["as_of"], "expiry": state["expiry"],
-            "entry_date": state["entry_date"], "stop_pct": state["stop_pct"],
-            "cycle_pct": total / slots if slots else 0.0,
-            "holds": holds, "exits": exits,
-            "cash_slots": slots - len(holds) - len(exits)}
+# summarise() removed 01-Sep-2026: dead code, zero callers anywhere.
+# Superseded by to_report() above, which produces the shared
+# daily_report.Report object render()/ledger.record() actually use.

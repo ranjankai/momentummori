@@ -109,192 +109,19 @@ def governing_expiry(as_of: date, trading_days=None) -> date:
     return exp
 
 
-def build(as_of: date, session=None) -> Report:
-    """
-    Assemble the evening report for `as_of` (a trading day whose bhavcopy
-    has been published). Raises strategy.StrategyError if the month
-    cannot be reconstructed -- the caller turns that into a failure alert.
-    """
-    trading_days = strategy.known_trading_days()
-    expiry = governing_expiry(as_of, trading_days)
-    symbols = strategy.load_fo_universe()
-    sectors = strategy.load_sector_map()
-
-    # ONE basket decision, shared with the order sheet and the CLI.
-    decision = strategy.basket_for(expiry, symbols, sectors, session=session)
-    hist = decision.hist
-    basket, full = decision.table, decision.full
-    basket_symbols = decision.symbols
-    ranked_order = decision.ranked_order
-    veto_dropped, veto_ran = decision.veto_dropped, decision.veto_ran
-
-    fwd = strategy.load_price_history(as_of, symbols, days=60)
-    merged = dict(hist)
-    merged.update(fwd)
-    days = [d for d in sorted(merged) if expiry < d <= as_of]
-    if not days:
-        raise strategy.StrategyError(
-            f"No trading days between governing expiry {expiry} and {as_of}")
-
-    # ONE engine, shared with the backtest.
-    #
-    # carry_forward=True is deliberate: it marks still-open positions to
-    # the last CLOSE, which is what "month to date" means for a book that
-    # has not been sold. carry_forward=False takes the other branch and
-    # force-sells at the final day's OPEN, which understated MTD by
-    # 0.30pp when this was first wired.
-    #
-    # The re-marking that carry_forward does to carry_out does not reach
-    # us: simulate_month snapshots open_positions with their ORIGINAL
-    # cost bases before that branch runs.
-    # Mid-month replacements are chosen on CASH data recomputed today,
-    # never on the frozen expiry composite -- rollover's rank ordering is
-    # static for three weeks between expiries. The LLM picks from the full
-    # eligible list; None means nothing cleared the deployment hurdle and
-    # the slot stays in cash.
-    candidate_fn = None
-    if config.LLM_CANDIDATE_ENABLED:
-        import llm_judgment
-        rs = llm_judgment.rs_rank(as_of, symbols, merged)
-
-        def candidate_fn(eligible, _rs=rs):
-            ordered = [s for s in _rs.index if s in set(eligible)]
-            if not ordered:
-                return None
-            return llm_judgment.choose_candidate(ordered, _rs).get("symbol")
-
-    stop_pct = strategy.resolve_stop_pct(expiry, symbols, hist)
-
-    # entry_overrides from book.json (25-Aug-2026 fix): this reconstructs
-    # the OUTGOING month to tell HOLD from SELL -- it used to enter every
-    # name at "days[0]'s open" via simulate_month's default, an idealized
-    # assumption identical to the one just fixed in cycle_state.py, and
-    # for the same reason: book.json already has the REAL fill price/date
-    # (and the real risk_anchor stop/target basis) for every name that
-    # actually went through entry_tracking's 3-stage mechanism, but this
-    # function never looked. A name real-stopped-out near its idealized
-    # stop level could silently misclassify as HOLD (or the reverse) --
-    # see book.py's module docstring. Reuses simulate_month's existing
-    # entry_overrides parameter (built for exactly this) instead of any
-    # new mechanism. A symbol with no book record (legacy, pre-book.py)
-    # simply isn't in the dict and falls back to the old behaviour.
-    import book as book_module
-    entry_overrides = {}
-    for sym in basket_symbols:
-        # A position that already exited mid-cycle (stop/target) is
-        # archived and gone from the live book by now -- fall back to
-        # book_archive.jsonl so an already-closed name's real entry isn't
-        # silently dropped back to the idealized guess (25-Aug-2026,
-        # found reconstructing this exact case: ADANIGREEN stopped out
-        # 18-Aug, book.get() alone would go blank for it here).
-        pos = book_module.get(sym) or book_module.get_archived(sym)
-        if pos and pos.get("entry_price") is not None:
-            anchor = pos.get("risk_anchor") or pos["entry_price"]
-            # A real entry_date at or before this window's own first day
-            # (a continuing hold from an earlier cycle, or a backfilled/
-            # reconstructed record stamped with the expiry date itself
-            # rather than a real Day-1 trading date) must clamp to
-            # `days[0]` -- simulate_month only walks `days`, so an
-            # unclamped earlier date would defer into a date the loop
-            # never visits and the position would silently never open.
-            entry_dte = max(date.fromisoformat(pos["entry_date"]), days[0])
-            entry_overrides[sym] = (pos["entry_price"], entry_dte, anchor)
-
-    res = strategy.simulate_month(
-        ranked_order, merged, days, sectors,
-        basket_symbols=basket_symbols, carry_forward=True,
-        stop_pct=stop_pct, candidate_fn=candidate_fn,
-        entry_overrides=entry_overrides or None)
-    # `res.to_buy` (mid-cycle replacement candidates) is NOT carried onto
-    # the Report at all (14-Aug-2026 cleanup) -- Stream 2 (this daily note)
-    # never buys, only Stream 1 (entry_tracking.py, expiry evening through
-    # Day 3) does. A freed slot sits in cash till next cycle in production
-    # anyway (config.V4_REDEPLOY_ENABLED = False), so this was always dead
-    # weight here -- still used for `empty_slots`, which is informational.
-    holdings, exits, to_buy, mtd = (res.open_positions, res.exits,
-                                    res.to_buy, res.return_pct)
-
-    rpt = Report(as_of=as_of, expiry=expiry, entry_date=days[0],
-                 holdings=holdings, exits=exits,
-                 mtd_return_pct=mtd,
-                 empty_slots=config.PORTFOLIO_SIZE - len(holdings) - len(to_buy))
-
-    # --- actionable orders -------------------------------------------------
-    # A target sell is only accepted by the exchange once it is inside the
-    # dynamic price band, so it is issued the evening it becomes placeable
-    # rather than on entry day. Momentum/rollover sells (a stock dropping
-    # out of the basket) are NOT reported here -- that only happens at the
-    # monthly rebalance and is already reported that same evening by
-    # build_entry_sheet/render_entry_sheet (Stream 1's Day-0 sheet), so
-    # repeating it here the next evening would just be a second, later
-    # notice of the same decision. (14-Aug-2026 cleanup: the old MOMENTUM
-    # branch here read `rpt.to_sell`, a field this daily build() never
-    # actually populated -- it was already dead code, just for the wrong
-    # reason. Removed rather than fixed, since Stream 1 is the right home
-    # for it, not this note.)
-    for h in rpt.holdings:
-        if h.target_placeable:
-            rpt.sell_orders.append({
-                "symbol": h.symbol, "kind": "TARGET",
-                "limit": round(h.target, 2),
-                "last": round(h.last, 2) if h.last else None,
-            })
-
-    # --- daily off-momentum judgement ----------------------------------
-    # Mid-month only; expiry day is mechanical. Additive to the 5% stop:
-    # it can bring a position out early and can do nothing else.
-    if config.LLM_EXIT_ENABLED and rpt.holdings:
-        import llm_judgment
-        for h in rpt.holdings:
-            try:
-                feat = llm_judgment.build_features(h.symbol, as_of, merged,
-                                                   entry=h.entry)
-                held_days = len([x for x in days if x >= h.entry_date])
-                v = llm_judgment.exit_judgement(h.symbol, feat, held_days,
-                                                h.entry, h.stop)
-            except Exception as exc:
-                logger.error("Exit judgement failed for %s: %s", h.symbol, exc)
-                continue
-            if v.get("exit_now"):
-                rpt.sell_orders.append({
-                    "symbol": h.symbol, "kind": "OFF_MOMENTUM", "limit": None,
-                    "reason": v.get("exit_reason", ""),
-                    "confidence": v.get("confidence"),
-                })
-
-    # --- how have the exits aged? --------------------------------------
-    # Mark every closed trade to today's close. If the stock is higher
-    # now than where we sold, the exit was wrong -- and it should be
-    # visible rather than quietly forgotten.
-    today_frame = merged.get(as_of)
-    for e in rpt.exits:
-        # 31-Aug-2026 fix: an exit that happened TODAY is already shown in
-        # full, with its own reason and price, under "Exits today" a few
-        # lines above this section in render() -- repeating it here under
-        # "Exited" too, on the very same day, was pure duplication (worse,
-        # confusingly worded: "exited at X% on <today>, today at Y%" reads
-        # as two different days when it's one). This section is for aging
-        # PAST exits, not re-announcing today's.
-        if e.exit_date == as_of:
-            continue
-        now = None
-        if today_frame is not None and e.symbol in today_frame.index:
-            c = today_frame.at[e.symbol, "close_price"]
-            if pd.notna(c) and c > 0:
-                now = float(c)
-        rpt.exited_review.append({
-            "symbol": e.symbol,
-            "reason": e.reason,
-            "exit_pct": round(e.pnl_pct, 2),
-            "now_pct": round((now - e.entry) / e.entry * 100, 2) if now else None,
-            "exit_date": e.exit_date,
-        })
-
-    # Already computed above, BEFORE the simulation, so the walk used the
-    # same ten names the veto left behind.
-    rpt.veto_dropped = veto_dropped
-    rpt.veto_ran = veto_ran
-    return rpt
+# daily_report.build() was removed 01-Sep-2026: confirmed dead code, not
+# called by cmd_daily (which uses cycle_state.build()/to_report() -- see
+# that module's own comments for why the incremental engine exists) or
+# anywhere else in the live pipeline, backtesting, or research scripts.
+# It had silently diverged from cycle_state's copy of the same logic
+# twice (the 17-Aug SELL ORDERS gap and the 01-Sep Exited-section
+# duplicate were BOTH fixed here first, in the dead function, before the
+# real bug in cycle_state.py was found and fixed separately) -- with zero
+# test coverage keeping the two in sync, despite a docstring above once
+# claiming a parity test existed. See CONTEXT.md's 01-Sep-2026 session
+# for the full audit. cycle_state.to_report() is now the only place a
+# Report gets assembled; governing_expiry() above is still live (used by
+# build_entry_sheet and cycle_state.py) and was kept.
 
 
 # ---------------------------------------------------------------------------
@@ -381,6 +208,41 @@ def render_performance(perf: dict) -> str:
                     f"not a track record until 1Y)")
         L.append(f"<b>CAGR: {s2}{perf['cagr']:.1f}%</b>{note}")
     return "\n".join(L).strip()
+
+
+TICK_BANDS = (
+    # (price ceiling for this band, tick size). NSE price-band tick
+    # regime, last revised 15-Apr-2025 (applies to both cash and F&O
+    # stock derivatives, same tick as the underlying CM security).
+    (250, 0.01),
+    (1000, 0.05),
+    (5000, 0.10),
+    (10000, 0.50),
+    (20000, 1.00),
+    (float("inf"), 5.00),
+)
+
+
+def _round_to_tick(price: float) -> float:
+    """
+    Snap `price` to the nearest valid NSE tick for its own price band
+    (01-Sep-2026 addition). A limit/SL/target price that isn't a multiple
+    of its band's tick literally cannot be placed at a broker -- caught
+    on POWERINDIA's real SL of 31,706.25: that stock trades above
+    Rs 20,000, where the tick is Rs 5, so the nearest placeable prices
+    are 31,705 or 31,710, not the unrounded 5%-off-anchor figure. Below
+    Rs 1,000 (most of this basket) the tick is 0.05 or smaller, where the
+    gap is a few paise and was judged not worth rounding for (27-Aug-2026
+    discussion) -- but that judgment doesn't hold once a name prices
+    into the wider bands, where the same unrounded math produces a
+    genuinely unplaceable order, not just an imprecise one.
+    """
+    if price <= 0:
+        return price
+    for ceiling, tick in TICK_BANDS:
+        if price <= ceiling:
+            return round(round(price / tick) * tick, 2)
+    return price  # unreachable -- TICK_BANDS' last ceiling is inf
 
 
 def _compute_stock_entry_band(sym: str, hist: dict, close: float) -> tuple:
@@ -558,6 +420,11 @@ def _solve_shares_to_slot(slot: float, r: dict) -> tuple:
         # outside the tradeable band, clamp to the nearest edge -- still
         # placeable, just no longer a perfect match.
         price = min(max(slot / n, lo), hi)
+        # 01-Sep-2026: tick-round BEFORE computing deviation, not after --
+        # the deviation and the tie-break below must judge the price the
+        # investor will actually be able to place, not a hypothetical
+        # unrounded one.
+        price = _round_to_tick(price)
         dev = abs(n * price - slot) / slot * 100.0
         if (best_local is None or dev < best_local[2] - 1e-6
                 or (abs(dev - best_local[2]) <= 1e-6 and price < best_local[1])):
